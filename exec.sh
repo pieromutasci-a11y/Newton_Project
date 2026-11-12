@@ -1,0 +1,1 @@
+docker exec -it newton-lab-Mutasci bash

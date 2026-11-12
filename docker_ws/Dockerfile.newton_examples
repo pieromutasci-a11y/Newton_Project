@@ -1,0 +1,27 @@
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NVIDIA_DRIVER_CAPABILITIES=all \
+    UV_LINK_MODE=copy
+
+# Dipendenze di sistema: git/curl per clonare e installare uv,
+# librerie GL/X11 per la finestra OpenGL degli esempi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl ca-certificates build-essential \
+    libgl1 libglu1-mesa libegl1 libglx-mesa0 \
+    libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (gestisce anche la versione di Python)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Repo Newton
+WORKDIR /workspace
+RUN git clone https://github.com/newton-physics/newton.git
+WORKDIR /workspace/newton
+
+# Installa Newton con le dipendenze per gli esempi
+RUN uv sync --extra examples
+
+CMD ["bash"]
