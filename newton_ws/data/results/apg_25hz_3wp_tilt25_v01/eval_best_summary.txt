@@ -1,0 +1,13 @@
+apg_25hz_3wp_tilt25_v01 (best.pt) - valutazione, drone 0, 40 ms/passo
+passi di controllo registrati: 320 (12.8 s)
+
+                     min        max     limite
+spinta [N]          0.234     1.282   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0054   +0.0062   ±0.0210
+momento y [N·m]   -0.0054   +0.0044   ±0.0210
+momento z [N·m]   -0.0085   +0.0084   ±0.0085
+
+|v lineare| max nel corpo [m/s]:  x 2.45  y 1.43  z 0.99   (norma max 2.51)
+|ω| max nel corpo [rad/s]:       x 3.53  y 2.14  z 7.49
+
+passi con comando oltre il 95% del limite:  spinta 0.0%  Mx 0.0%  My 0.0%  Mz 3.4%

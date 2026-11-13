@@ -1,191 +1,207 @@
-# Multi-drone con Newton: appunti di progetto
+# Multi-drone con Newton: stato del progetto
 
-Questo file riassume le decisioni prese e lo stato del lavoro, per riprenderlo su un'altra macchina
-(anche con una nuova sessione di Claude: leggere questo file per primo).
+Riassunto di dove siamo arrivati e di cosa vogliamo fare, per riprendere il lavoro (anche su un'altra
+macchina o con una nuova sessione di Claude: leggere questo file per primo).
+
+Ultimo aggiornamento: 13/11/2026.
 
 ## 1. Obiettivo
 
-Addestrare **più droni (multi-agent)** con:
-- simulazione e training **interamente su GPU**, evitando di saturare la CPU;
-- **differentiable learning** (gradienti attraverso la simulazione) per training più rapido e preciso;
-- tutto in Python, con kernel **Warp** per la parte fisica e **PyTorch** per la rete.
+Addestrare **più droni (multi-agent)** con **Newton** (NVIDIA Warp) e **confrontare tempi di training e risultati
+con il progetto Isaac Lab** esistente (DJI Tello, PPO/IPPO):
 
-Scelta: **Newton "puro"** (non Isaac Lab/Isaac Sim con PhysX). Vantaggi: kernel custom su GPU,
-differenziabilità, leggerezza, open source. Prezzo: **nessun framework di RL pronto**
-(ambienti, osservazioni, reward, reset, domain randomization vanno scritti a mano),
-meno documentazione e meno asset, API in evoluzione.
-La velocità di training non è garantita a priori: anche PhysX gira su GPU, dipende da caso e solver.
-Isaac Lab + Newton esiste ma, nella documentazione di Isaac Lab, è tra le *experimental features*.
+- simulazione e training **interamente su GPU**, senza saturare la CPU;
+- controllore addestrato con **APG** (*analytic policy gradient*): il gradiente del costo passa attraverso la fisica
+  differenziabile fino ai pesi, **senza PPO**, critic né esplorazione;
+- **controllo a cascata** come in Isaac Lab: rete di posizione → riferimenti di velocità → rete di velocità → spinta e momenti.
+
+**Dove siamo:** il solo controllore di posizione, che comanda direttamente spinta e momenti (cascata di velocità non ancora fatta),
+per un drone singolo in 4096 mondi paralleli. Funziona: raggiunge sequenze di 3 riferimenti con precisione di pochi cm.
+Il multi-drone vero e proprio (più droni nello stesso mondo) è il passo finale, non ancora iniziato.
 
 ## 2. Ambiente (Docker)
 
-Newton gira in un container con GPU NVIDIA. Requisiti dalla documentazione di Newton:
-- Python 3.11+ (lo gestisce `uv`);
-- driver NVIDIA **R580+** per il wheel standard di Warp 1.18 (macchina di lavoro: RTX A1000, driver 580.173);
-  su R545-R579 serve `warp-lang==1.17.0` (vedi installation guide);
-- non serve il CUDA Toolkit locale.
+Sull'host (`/home/piero/Scrivania/Newton/`):
 
-Struttura sull'host (macchina di lavoro, `/home/piero/Scrivania/Newton/`):
 ```
-docker_ws/Dockerfile.newton_examples   # definizione dell'immagine
-docker_ws/build.sh                     # docker build -f Dockerfile.newton_examples -t newton-examples .
-run.sh                                 # avvia il container
-exec.sh                                # docker exec -it newton-lab-Mutasci bash (seconda shell)
-newton_ws/                             # QUESTO progetto, montato nel container
+docker_ws/Dockerfile.newton_examples   # immagine: CUDA 12.4 runtime + uv + clone di Newton + torch (CUDA 13) + tensorboard
+docker_ws/build.sh                     # docker build ... -t newton-examples
+run.sh                                 # avvia il container (nome newton-lab-Mutasci, --rm, GPU, X11)
+exec.sh                                # seconda shell nello stesso container
+chown_me.sh                            # sudo chown -R $USER:$USER . (i file creati dal container sono di root)
+newton_ws/                             # QUESTO progetto, montato in /workspace/project_workspace
 ```
 
-**Dockerfile** (clone di Newton + `uv sync`, come da development guide, metodo 1):
-```dockerfile
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
-ENV DEBIAN_FRONTEND=noninteractive NVIDIA_DRIVER_CAPABILITIES=all UV_LINK_MODE=copy
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates build-essential \
-    libgl1 libglu1-mesa libegl1 libglx-mesa0 \
-    libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 \
-    && rm -rf /var/lib/apt/lists/*
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
-WORKDIR /workspace
-RUN git clone https://github.com/newton-physics/newton.git
-WORKDIR /workspace/newton
-RUN uv sync --extra examples
-CMD ["bash"]
-```
+Nel container il venv di Newton è il Python di default e `PYTHONPATH` punta a `newton_ws/src`, quindi si lancia
+`python /workspace/project_workspace/src/...` da qualunque cartella.
 
-**run.sh**: monta `newton_ws` (host) su `/workspace/project_workspace` (container). Il resto,
-`/workspace/newton` (repo + `.venv`), resta quello dell'immagine e non è mappato. Usa GPU (`--gpus all`) e X11
-(`xhost +local:docker`, `DISPLAY`) per le finestre. Nome container fisso: `newton-lab-Mutasci`, container `--rm`.
+Requisiti (documentazione di Newton): GPU NVIDIA **Turing o più recente** (compute capability 7.5+) e driver **R580+**
+per Warp 1.18; macchina di lavoro: RTX A1000 (8 GB), driver 580. Una GPU Maxwell (es. MX130) non è supportata dal setup attuale.
+Memoria misurata del training: circa 0.4 GB con 1024 mondi, 0.9 GB con 4096 (orizzonte 32).
 
-Uso:
 ```bash
-./docker_ws/build.sh                                   # una volta
-./run.sh                                               # shell nel container (cwd /workspace/newton)
-./run.sh uv run -m newton.examples diffsim_drone       # lancia un esempio
-# dentro il container, per codice del progetto:
-cd /workspace/newton && uv run python /workspace/project_workspace/src/<script>.py
+./docker_ws/build.sh        # una volta
+./run.sh                    # avvia il container (lasciarlo aperto)
+./exec.sh                   # altre shell
 ```
 
-> **STATO: il build dell'immagine non è mai stato completato né verificato** (interrotto la prima volta),
-> e nessun codice del progetto è stato eseguito. Tutto va provato al primo avvio.
+## 3. Struttura del codice (`src/`)
 
-Alternativa documentata per chi *usa* Newton come libreria (non lo sviluppa): `pip install "newton[examples]"`
-in un venv (installation guide). Il flusso clone + `uv sync` è quello della development guide.
-Considerata ma non adottata: Dockerfile con `uv venv` + `uv pip install "newton[examples]"`, senza clone.
-
-Problemi noti/rischi dell'impostazione attuale:
-- il `git clone` nell'immagine è in cache: un nuovo build non aggiorna Newton senza `--no-cache`;
-- container `--rm` e girano come root: cache dei kernel Warp persa a ogni avvio (prima esecuzione lenta;
-  soluzione: volume su `~/.cache/warp`) e file creati in `newton_ws` di proprietà root (`--user $(id -u):$(id -g)`);
-- `uv run` può provare a risincronizzare il venv (`--frozen` lo evita), oppure usare `/workspace/newton/.venv/bin/python`
-  o mettere `/workspace/newton/.venv/bin` nel `PATH` dell'immagine.
-
-## 3. Concetti chiave (cosa si è chiarito)
-
-- **uv**: un solo tool al posto di pip + venv + pyenv; non è un acronimo. `uv sync` crea il venv da `pyproject.toml`/`uv.lock`;
-  `uv run` esegue nel venv; `uv pip install` ≈ `pip install`.
-- **Kernel Warp**: funzione `@wp.kernel` scritta *per un solo elemento*, lanciata con `wp.launch(kernel, dim=...)` in parallelo
-  sulla GPU; `wp.tid()` dà l'indice del thread. Dentro: solo tipi Warp (`wp.array`, `wp.vec3`, `wp.transform`...), niente liste/dict/numpy/torch.
-  I kernel li scrive l'utente; Warp fornisce decoratore, tipi, funzioni matematiche e `wp.Tape` (gradienti).
-- **Warp vs Torch**: Warp per fisica, costi, sensori; Torch per rete, ottimizzatore, training.
-  Interscambio senza copie: `wp.to_torch(arr)` / `wp.from_torch(t)`. Per i gradienti attraverso la simulazione nel training
-  con Torch serve avvolgere il rollout Warp in una `torch.autograd.Function` che chiama `tape.backward()`
-  (da verificare nella documentazione quando si arriva al training). Mai `.numpy()` nel ciclo di training (copia su CPU, rompe i gradienti).
-- **ModelBuilder**: classe di Newton; il "cantiere" a cui si aggiungono corpi/forme (`add_body`, `add_shape_box`, ...);
-  `finalize()` produce il `Model` sulla GPU (massa e inerzia calcolate da forme e densità). La costruzione è Python normale su CPU, una volta sola.
-- **Stato**: `State.body_q` (transform: posizione + quaternione) e `State.body_qd` (spatial vector: velocità lineare+angolare;
-  **ordine delle componenti da verificare**). Indice del corpo del mondo `w`, drone `d`: `w * corpi_per_mondo + d`.
-- **Decoratori**: `@dataclass`, `@property`, `@wp.kernel`, `@wp.struct`...; `@dataclass` genera `__init__`/`__repr__`.
-
-## 4. Come funziona l'esempio `diffsim_drone` (riferimento)
-
-File: `newton/examples/diffsim/example_diffsim_drone.py` (nel clone dentro l'immagine). **Non è training di una rete**:
-è MPC con ottimizzazione di traiettoria tramite gradiente attraverso la fisica.
-- **Azioni**: 4 spinte dei propeller in [0.1, 1.0]. Variabile ottimizzata: 4 punti di controllo × 4 motori (distanza 10 step, orizzonte 30 step = 0.5 s a 60 fps),
-  interpolati linearmente (`interpolate_control_linear`), moltiplicati per il gain 0.8, poi `compute_prop_wrenches`:
-  forza = dir·max_thrust·comando; coppia di reazione = dir·max_torque·comando·verso + braccio×forza; sul corpo come `body_f`.
-- **Costo** (`drone_cost`, per step): distanza² dal target (peso 1000), quota fuori da [0.25, 0.75] (100), inclinazione `1 - dot(su, z)` (10),
-  velocità² (0.1), comando² (0.05); normalizzato per la somma dei pesi e per `0.8^(H-step-1)/H²` (conta di più la fine dell'orizzonte).
-  Più `collision_cost` con SDF dal palo (margine = raggio, peso 1e4).
-- **Ciclo per frame**: 16 rollout campionati attorno alla traiettoria migliore (rumore σ=0.15) → 20 iterazioni di forward (30 step, 16 mondi in parallelo)
-  + backward (`wp.Tape`) + SGD (lr 1e-2) + clamp → si sceglie il rollout a costo minimo → si simula **solo il primo step** sul drone vero (receding horizon).
-  Forward/backward in un CUDA graph (`wp.ScopedCapture`). Campionamento + gradiente: ibrido perché il gradiente attraverso i contatti è inaffidabile.
-- Note: il rollout salva tutti gli stati intermedi (memoria); l'esempio usa `SolverSemiImplicit`.
-  Stranezza: `rps = max_rpm / fps` (dimensionalmente dovrebbe essere `/60`; funziona perché fps=60).
-- Massa dell'esempio: non esplicita, deriva da densità 1750 kg/m³ e due scatole (semi-estensioni 0.01×0.2×0.01, `drone_size=0.2`):
-  stimata ≈ **0.56 kg** (mio calcolo, da verificare con `model.body_mass`). Spinta max ≈ 4.18 N/rotore, spinta/peso ≈ 3, hover a comando ≈ 0.33.
-
-## 5. Architettura del progetto (`src/`)
-
-Regola: file per responsabilità; `@dataclass` per i parametri; kernel e funzioni per la fisica; **classi solo dove c'è stato** (World, policy, trainer).
-Tutto lo stato in `wp.array` con indici di mondo/drone (niente oggetti per drone); nessun `.numpy()` nel rollout differenziabile; forward/backward in CUDA graph.
+Regola: **Warp solo dentro `TrainWorld`**; sopra (env, costo, rete, training) solo tensori PyTorch.
 
 ```
 src/
-  drone_model/            # com'è fatto il drone, indipendente dal compito
-    params.py             # DroneParams (SI)                                  [FATTO]
-    actuators.py          # struct Propeller [FATTO]; kernel forze/coppie [DA FARE]
-    builder.py            # add_drone(builder, params, label, collision_group) [FATTO]
-    sensors.py            # osservazioni (inizialmente stato esatto)          [DA FARE]
+  drone_model/                        # com'è fatto il drone
+    params.py                         # DroneParams: massa 0.087 kg, inerzie, thrust/weight 1.8, scale dei momenti (come Isaac Lab)
+    actuators.py                      # UNICO kernel Warp nostro: apply_wrench (azioni -> spinta e momenti sul corpo)
+    builder.py                        # add_drone: UN corpo rigido + scatola di collisione; con visual=True aspetto da quadricottero
   scene/
-    world.py              # classe World: ModelBuilder/finalize, N mondi x M droni, Model, State, Control, solver, step/reset  [DA FARE]
-    task.py               # costo/reward come kernel (target, quota, collisioni, separazione tra droni) [DA FARE]
-    reset.py              # reset per mondo con condizioni iniziali randomizzate [DA FARE]
+    train_world.py                    # TrainWorld: N mondi, fisica differenziabile, ponte Warp<->PyTorch (_SimStep), decimation
+    test_world.py                     # mondo singolo con pavimento e XPBD (solo per prove e viewer)
+  controllers/pos_controller/
+    mlp_config.yaml                   # rete: 18 -> [256,128,64] ELU -> 4 tanh, normalizzazione delle osservazioni
+    pos_controller_mlp.py             # PosControllerMLP (deterministica, statistiche mobili delle osservazioni)
+    pos_controller_env.py             # PosControllerEnv: errori, osservazioni, avanzamento riferimenti, reset
+    target_handler.py                 # TargetHandler: coda di riferimenti casuali (x, y, z, yaw)
   train/
-    policy.py             # rete PyTorch                                      [DA FARE]
-    rollout.py            # rollout differenziabile con wp.Tape               [DA FARE]
-    trainer.py            # ciclo di training                                 [DA FARE]
+    cost_function.py                  # CostWeights + cost_function (pesi di default = ultimo run, vedi sotto)
+    train_APG.py                      # training: finestre di BPTT, log tensorboard, checkpoint
   eval/
-    evaluate.py           # valutazione/visualizzazione                       [DA FARE]
-  configs/                # parametri in un file                              [DA FARE]
+    eval_policy.py                    # valutazione con GUI: la rete guida il drone, 5 riferimenti, poi chiude e salva i grafici
+    plots.py                          # grafici e riepilogo (posizione, yaw, velocità, spinta, momenti)
+  tests/                              # test_pos_env, test_cost_function, test_decimation, test_train_world, grad_check, ...
+data/
+  policy/<run>/{best,last}.pt         # checkpoint della policy
+  results/<run>/                      # log tensorboard + grafici di valutazione (eval_best.png, eval_best_summary.txt)
 ```
 
-### Stato del codice scritto (non eseguito)
-- `params.py`: `DroneParams` con geometria (semi-estensioni), densità, coefficienti propeller dell'esempio, limiti del comando;
-  proprietà derivate `max_rps` (= max_rpm/60), `max_thrust` (Ct·ρ·n²·D⁴), `max_torque` (Cp·ρ·n²·D⁵/2π).
-- `actuators.py`: `@wp.struct Propeller` (body, pos, dir, max_thrust, max_torque, turning_direction).
-- `builder.py`: `add_drone` aggiunge il corpo, due barre a croce (box, densità da `params`), 4 propeller a ±x/±y con versi alternati
-  (-1, +1, +1, -1); ritorna `(DroneHandle(body), lista_propeller)`. `World` concatenerà i propeller di tutti i droni in un `wp.array`.
-  `ModelBuilder` viene creato e chiuso (`finalize`) da `World`, non dal builder.
+## 4. Come funziona
 
-### Test da fare per primo (nel container)
+### 4.1 APG contro PPO (in breve)
+
+| PPO (Isaac Lab) | APG (qui) |
+|---|---|
+| PhysX è una scatola nera: il gradiente si stima da campioni | la fisica è nel grafo: il gradiente è esatto (regola della catena) |
+| rete gaussiana + critic + GAE + clipping | rete deterministica con `tanh`, nessun critic |
+| reward, anche a gradino (+80 arrivo, −10 morte) | **costo liscio**: niente gradini, norme o `acos` che danno NaN |
+| 5 epoche sugli stessi dati | un aggiornamento per finestra |
+| sconto γ per i premi lontani | finestra di 32 passi di controllo (BPTT troncata) |
+
+Il gradiente è il prodotto delle derivate della fisica su tutti i passi: è il motivo per cui la fisica deve essere stabile (vedi 6).
+
+### 4.2 Un passo di controllo
+
+```
+rete (PyTorch) -> azioni (N,4) in [-1,1]
+  x4 passi di fisica a 100 Hz con la stessa azione (zero-order hold), registrati in un wp.Tape:
+      clear_forces  ->  apply_wrench [nostro kernel]  ->  solver.step (SolverSemiImplicit, senza contatti)
+stato (N,7) e (N,6) visto da PyTorch senza copia (wp.to_torch)
+env + costo (PyTorch) -> loss;  backward: tape.backward() ripercorre i kernel al contrario
+```
+
+- **Frequenze come in Isaac Lab:** fisica 100 Hz (`dt = 0.01`), `decimation = 4` → rete di posizione a **25 Hz** (`ctrl_dt = 0.04 s`).
+  Il controllore di velocità futuro girerà a 50 Hz (ogni 2 passi di fisica).
+- **Drone:** un solo corpo rigido. Spinta = `1.8 · peso · (a0+1)/2` lungo z del corpo (0 ... 1.536 N, hover a 0.853 N con a0 = 0.111);
+  momenti = `(0.021, 0.021, 0.0085) · a[1:4]`; azioni limitate in [−1, 1]. Stesse formule di Isaac Lab (verificato).
+- **Osservazioni (18):** errore di posizione **nel sistema del corpo** (3), sin/cos errore di yaw (2), velocità lineare (3) e angolare (3) nel corpo,
+  gravità proiettata (3), azione precedente (4). Normalizzate con media e varianza mobili (come `RunningStandardScaler` di skrl).
+- **Riferimenti (come Isaac Lab):** coda di **3 waypoint** per episodio (x, y ∈ ±1.5 m, z ∈ 0.5-1.5 m, yaw ∈ ±π). Si avanza quando il drone sta entro
+  **0.15 m e 0.2 rad per 1.2 s**; dopo l'ultimo il riferimento resta. Episodio da **15 s**. Reset anche per inclinazione > 65°, stato non finito o drone oltre 20 m.
+- **Training:** `--horizon 32` passi di controllo (1.28 s, 128 passi di fisica) per finestra, 4096 mondi, Adam, lr 1e-3, clip del gradiente a 1.0,
+  gli aggiornamenti con gradiente non finito vengono saltati. Circa **170 ms per iterazione, 3000 iterazioni ≈ 8-9 minuti**.
+
+### 4.3 Costo (pesi di default attuali, in `train/cost_function.py`)
+
+Somma di termini per passo (più basso = meglio), tutti derivabili:
+
+| Termine | Peso | Cosa fa |
+|---|---|---|
+| posizione, ampio raggio | 1.0 · (1 − e^(−0.5 d)) | avvicinarsi |
+| posizione, precisione | 1.4 · (1 − e^(−8 d)) | arrivare sul bersaglio |
+| yaw | 0.32 · \|err\| e 0.32 · (1 − e^(−7 \|err\|)) | allinearsi |
+| velocità lineare | **0.1** · v² (+ 0.5 · v² entro 0.5 m: frenata) | limita la velocità |
+| velocità angolare | **0.01** · (ωx² + ωy²); 0.002 su z | smorza rotazioni |
+| assetto | **0.5** · (1 − cos tilt); 10 · eccesso² oltre **25°** | limita l'inclinazione |
+| azioni | 0.1 · Δazione²; 0.01 · (azione − hover)² | comandi lisci |
+
+I pesi di posizione e yaw sono quelli di Isaac Lab divisi per 25; gli altri sono stime tarate a mano. I valori in grassetto sono quelli cambiati
+nell'ultima iterazione. Si possono cambiare da riga di comando con `--cost nome=valore` (ripetibile).
+
+## 5. Comandi
+
 ```bash
-cd /workspace/newton
-uv run python - <<'E'
-import sys; sys.path.insert(0, "/workspace/project_workspace/src")
-import newton
-from drone_model.params import DroneParams
-from drone_model.builder import add_drone
-p = DroneParams(); b = newton.ModelBuilder()
-h, props = add_drone(b, p, "drone_0"); m = b.finalize()
-print("massa", m.body_mass.numpy(), "kg")
-print("spinta/peso", 4*p.max_thrust / (m.body_mass.numpy()[0]*9.81))
-E
+# training (dura circa 8-9 minuti; lo lancia l'utente). Il run_name deve essere nuovo a ogni prova:
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train/train_APG.py \
+  --num_envs 4096 --horizon 32 --iterations 3000 --lr 1e-3 --grad_clip 1.0 \
+  --log_interval 50 --ckpt_interval 200 --run_name <nome>
+
+# valutazione con GUI (chiude da sola dopo 5 riferimenti e salva grafici e riepilogo in data/results/<nome>/)
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_policy.py --run <nome> [--ckpt last] [--num_drones 1]
+
+# test (secondi)
+docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_pos_env.py
+docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_cost_function.py
+docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_decimation.py
+
+# curve di training
+tensorboard --logdir /workspace/project_workspace/data/results
 ```
-Atteso: massa ≈ 0.56 kg, spinta/peso ≈ 3 (la massa potrebbe differire un po' se il builder non sottrae la sovrapposizione delle barre).
 
-## 6. Prossimi passi
+Nel log di training: `dist` (distanza media dal riferimento, un drone fermo vale circa 1.4 m), `wp` (indice medio del riferimento, 0-2),
+`|grad|`, `saltate` (aggiornamenti scartati). I file creati dal container sono di root: lanciare `chown_me.sh` prima di modificarli dall'host.
 
-1. Far partire il build dell'immagine e verificare il test qui sopra; lanciare `diffsim_drone` per vedere l'esempio.
-2. `actuators.py`: kernel `compute_prop_wrenches` (comando → forze/coppie), poi prova di caduta libera a motori spenti e hover a ≈0.33.
-3. `scene/world.py`: N mondi in parallelo × M droni, con `collision_group` per mondo; reset per mondo.
-4. `scene/task.py`: costo/reward come kernel, con termini multi-agent (separazione tra droni, formazione).
-5. `train/`: policy in PyTorch, rollout brevi differenziabili, training con backward attraverso la simulazione
-   (famiglia di metodi tipo APG/SHAC, citati dalla memoria: da cercare in letteratura).
-6. Rischi da provare presto: quanti mondi/droni entrano in memoria GPU (il backward salva tutti gli stati); stabilità dei gradienti su orizzonti lunghi e nelle collisioni; **quali solver di Newton sono differenziabili** (l'esempio usa `SolverSemiImplicit`, il backend principale è MuJoCo Warp: da controllare).
+## 6. Risultati e cose imparate
 
-## 7. Decisioni ancora aperte
+Run in `data/policy/` (tutti con 4096 mondi, orizzonte 32, 3000 iterazioni, 25 Hz, 3 riferimenti, tranne il primo):
 
-- **Interfaccia di controllo**: la policy produce la spinta dei 4 motori direttamente (come l'esempio), oppure spinta collettiva + velocità angolari
-  (controllore di rate sotto), oppure setpoint di velocità/posizione? Cambia `actuators.py` e l'eventuale `controller.py`.
-- Realismo: dinamica dei motori (filtro del primo ordine), drag aerodinamico, vento/disturbi, effetti tra droni vicini: da aggiungere uno alla volta.
-- Sensori: stato esatto all'inizio; IMU rumorosa e osservazioni relative dei vicini solo se serve il trasferimento su hardware reale.
-- Randomizzazione dei parametri fisici tra i mondi paralleli.
-- Massa/inerzia: calcolate dalla geometria (attuale) oppure date direttamente da valori misurati?
+| Run | Pesi diversi dal default attuale | Esito |
+|---|---|---|
+| `apg_obsfix_h32` | schema vecchio (100 Hz, riferimenti a tempo) | **obsoleto**, non confrontabile |
+| `apg_25hz_3wp` | `action_rate` 0.1, `lin_vel` 0.01, `upright` 0.1, `ang_vel_xy` 0.002, tilt libero 35° | **divergenza a NaN** poco dopo l'it. 2000; `best.pt` (it. 2000) è buono: dist 0.19 m, **fermo a riposo**; velocità fino a 2.5 m/s, inclinazione 34° |
+| `apg_25hz_3wp_ar05` | `action_rate` 0.5 | più preciso (dist 0.13 m) ma **tremolio a riposo**: ciclo limite a 5 Hz sui comandi (±20% di spinta, quota ±2.5 mm) |
+| `apg_25hz_3wp_tilt25` | tilt 25°, `upright` 0.5, `ang_vel_xy` 0.01 | meno tremolio, ma **troppo veloce**: fino a 3.2 m/s |
+| `apg_25hz_3wp_tilt25_v01` | **= pesi di default attuali** (anche `lin_vel` 0.1) | scelto come il migliore: velocità 1.2-1.9 m/s, inclinazione 15-24°; più lento (dist media di training 0.51 m, tempo a 15 cm 1.0-2.2 s sui salti provati) |
 
-## 8. Riferimenti
+Cose da sapere:
 
-- Repo: https://github.com/newton-physics/newton (esempio in `newton/examples/diffsim/example_diffsim_drone.py`)
-- Installazione utente: `pip install "newton[examples]"` in un venv, poi `python -m newton.examples --list` (guide/installation)
-- Sviluppo da sorgente: `git clone` + `uv sync --extra dev` (guide/development)
-- Documentazione: https://newton-physics.github.io/newton/latest/
-- Pacchetto PyPI: `newton` (vecchio nome `newton-physics`, deprecato)
+- **Instabilità della rotazione:** con momenti nulli, a velocità angolare alta l'integrazione non conserva l'energia e diverge a NaN
+  (misurato: da 60-120 rad/s in pochi secondi, anche da 20 rad/s attorno a z). In training un solo drone in questo stato rende NaN le statistiche di
+  normalizzazione e quindi tutta la rete (successo nel run senza protezioni). Il funzionamento normale sta a 7-8 rad/s.
+  Protezioni già presenti: il normalizzatore ignora osservazioni non finite; `done()` resetta stati non finiti o a più di 20 m.
+- **Sistema troppo ideale:** nessun rumore, disturbo, ritardo né dinamica dei motori (anche in Isaac Lab i motori sono ideali: forza applicata al corpo).
+  Un controllore che non oscilla mai non dice nulla sulla robustezza.
+- **Limiti di attuazione:** a regime la rete sta sull'hover; nei transitori usa quasi tutto il campo di spinta (0.04-1.5 N) e il momento z
+  tocca il massimo (±0.0085 N·m) nel 2-3% dei passi. Da confrontare con i limiti reali del Tello.
+- **Comportamento alla partenza:** il costo premia l'arrivo rapido; senza limiti sulla velocità la rete si inclina molto quando cambia il riferimento
+  (74° a 3 m con i pesi vecchi). In Isaac Lab è la cascata (riferimenti di velocità limitati a ±1 m/s) a tenerlo basso.
+- Il confronto tra run **non è pulito** quando cambiano più pesi insieme; la loss non è confrontabile tra run con pesi diversi.
+
+## 7. Cosa vogliamo fare
+
+Prossimi passi, in ordine:
+
+1. **Misurare il tremolio a riposo** del run migliore (`tilt25_v01`) con la stessa prova usata per `ar05` (variazione delle azioni, ciclo limite):
+   finora di questo run sono stati misurati solo velocità, inclinazione e tempo di arrivo.
+2. **Robustezza numerica:** reset dei droni con velocità angolare eccessiva (es. > 30 rad/s) prima della divergenza e contatore dei mondi non finiti nel log
+   (proposto, non ancora fatto); learning rate decrescente a fine training.
+3. **Realismo, uno alla volta** (non ora): rumore sulle osservazioni, disturbi (vento/forze casuali), variazione di massa e spinta, dinamica dei motori
+   (filtro del primo ordine), eventuale ritardo. Il rumore va aggiunto anche in valutazione per un confronto onesto.
+4. **Controllore di velocità e cascata** (come Isaac Lab):
+   - rete di velocità (anello interno, 50 Hz) addestrata con APG: osservazioni 17 (velocità, gravità, azione precedente, riferimento di velocità),
+     riferimenti campionati in ±1 m/s (lineari) e ±1.5 rad/s (yaw), con modalità miste e curriculum, costo sull'errore di velocità normalizzato
+     + azioni lisce (peso crescente) + tilt;
+   - poi congelata; la rete di posizione produce 4 numeri (`tanh`) × scala = riferimenti di velocità, e la catena rete di posizione → rete di velocità → spinta e momenti
+     resta differenziabile (gradiente attraverso la rete di velocità: da tenere d'occhio la stabilità).
+5. **Multi-drone:** più droni nello stesso mondo (collision group, separazione, formazione), osservazioni dei vicini.
+6. **Confronto con Isaac Lab:** tempi di training (qui circa 8-9 minuti per 3000 iterazioni a 4096 mondi) e qualità dei risultati.
+7. **Manutenzione:** volume per la cache dei kernel Warp e porta 6006 per tensorboard in `run.sh`; i container girano come root (file di root in `newton_ws`);
+   aggiornare la copia su GitHub (`Newton_Project`; non so se il push è aggiornato: la cartella non è un repo git).
+
+## 8. Note di lavoro
+
+- I training lunghi li lancia l'utente: il comando si prepara e si spiega cosa guardare nel log.
+- Il progetto Isaac Lab di riferimento è in `/home/piero/Scrivania/Project_Favuzzi/...` (`tasks/direct/pos_controller` e `vel_controller`);
+  copia su GitHub: *Position-and-Velocity-Controller-Isaaclab-Djitello*.
+- Documentazione di Newton: https://newton-physics.github.io/newton/latest/ (esempio di riferimento `newton/examples/diffsim/example_diffsim_drone.py`).
+- Lavori su APG e simulazione differenziabile citati a memoria (da verificare prima di una bibliografia): Wiedemann et al. *Training Efficient Controllers via Analytic Policy Gradient* (ICRA 2023);
+  Mora et al. *PODS* (ICML 2021); Xu et al. *SHAC* (ICLR 2022).

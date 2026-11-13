@@ -1,39 +1,44 @@
-"""Parametri fisici del drone. Tutte le grandezze sono in unità SI."""
+"""Parametri fisici del drone (DJI Tello). Tutte le grandezze sono in unità SI.
 
-import math
+I valori di massa, inerzia, thrust-to-weight e scala dei momenti sono gli stessi
+usati nel progetto Isaac Lab (drone_physics.py e *_env_cfg.py), così i risultati
+sono confrontabili.
+"""
+
 from dataclasses import dataclass
 
 
 @dataclass
 class DroneParams:
-    # Geometria: le due barre a croce sono scatole. Le dimensioni sono SEMI-estensioni (half-extent).
-    arm_length: float = 0.2          # m, semi-lunghezza di ogni barra = distanza dei propeller dal centro
-    bar_half_width: float = 0.01     # m
-    bar_half_height: float = 0.01    # m
-    density: float = 1750.0          # kg/m^3 (fibra di carbonio)
+    # --- Dinamica del corpo rigido (valori del Tello, come in Isaac Lab) ---
+    mass: float = 0.087  # kg
+    # Tensore d'inerzia diagonale rispetto al centro di massa [kg*m^2]
+    ixx: float = 1.04e-4
+    iyy: float = 1.11e-4
+    izz: float = 2.07e-4
+    gravity: float = 9.81  # m/s^2, serve solo per calcolare il peso
 
-    # Propeller (valori dell'esempio diffsim_drone)
-    thrust_coeff: float = 0.109919   # adimensionale
-    power_coeff: float = 0.040164    # adimensionale
-    prop_diameter: float = 0.2286    # m
-    max_rpm: float = 6396.667        # giri/minuto
-    air_density: float = 1.225       # kg/m^3 (livello del mare)
+    # --- Geometria di collisione ---
+    # SEMI-estensioni (half-extent) di una scatola che approssima il corpo.
+    # Valori indicativi, da affinare: servono per le collisioni tra droni, non alla dinamica
+    # (massa e inerzia sono già fissate sopra e non dipendono da queste dimensioni).
+    half_x: float = 0.05  # m
+    half_y: float = 0.05  # m
+    half_z: float = 0.02  # m
 
-    # Limiti del comando normalizzato di ogni motore
-    control_min: float = 0.1
-    control_max: float = 1.0
+    # --- Conversione azioni normalizzate [-1, 1] -> fisica (come in Isaac Lab) ---
+    thrust_to_weight: float = 1.8  # spinta massima / peso
+    # Scala dei momenti (roll, pitch, yaw) corrispondente ad azione = 1 [N*m]
+    moment_scale_x: float = 0.021
+    moment_scale_y: float = 0.021
+    moment_scale_z: float = 0.0085
 
     @property
-    def max_rps(self) -> float:
-        """Giri al secondo alla massima velocità."""
-        return self.max_rpm / 60.0
+    def weight(self) -> float:
+        """Peso del drone [N]."""
+        return self.mass * self.gravity
 
     @property
     def max_thrust(self) -> float:
-        """Spinta massima di un propeller [N]: Ct * rho * n^2 * D^4."""
-        return self.thrust_coeff * self.air_density * self.max_rps**2 * self.prop_diameter**4
-
-    @property
-    def max_torque(self) -> float:
-        """Coppia di reazione massima di un propeller [N*m]: Cp * rho * n^2 * D^5 / (2*pi)."""
-        return self.power_coeff * self.air_density * self.max_rps**2 * self.prop_diameter**5 / (2.0 * math.pi)
+        """Spinta massima [N] (azione di spinta = +1). La minima è 0 (azione = -1)."""
+        return self.thrust_to_weight * self.weight

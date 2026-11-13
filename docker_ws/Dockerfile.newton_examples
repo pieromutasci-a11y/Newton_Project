@@ -2,7 +2,8 @@ FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_DRIVER_CAPABILITIES=all \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1
 
 # Dipendenze di sistema: git/curl per clonare e installare uv,
 # librerie GL/X11 per la finestra OpenGL degli esempi
@@ -21,7 +22,19 @@ WORKDIR /workspace
 RUN git clone https://github.com/newton-physics/newton.git
 WORKDIR /workspace/newton
 
-# Installa Newton con le dipendenze per gli esempi
-RUN uv sync --extra examples
+# Newton con le dipendenze per gli esempi + PyTorch (CUDA 13, driver NVIDIA R580+)
+RUN uv sync --extra examples --extra torch-cu13
+
+# Strumenti per il training: curve di loss (tensorboard) e barre di avanzamento (tqdm).
+# matplotlib, numpy, scipy e pyyaml sono già installati dalle dipendenze di Newton.
+RUN uv pip install tensorboard tqdm
+
+# Il venv di Newton diventa il Python di default nel container: basta `python script.py`
+# da qualunque cartella (uv run funziona comunque).
+ENV PATH="/workspace/newton/.venv/bin:${PATH}"
+
+# Il progetto (cartella newton_ws dell'host, montata da run.sh) è importabile come
+# `import drone_model`, `import scene`, `import controllers`, senza sys.path.insert
+ENV PYTHONPATH="/workspace/project_workspace/src"
 
 CMD ["bash"]

@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .venv/
+imgui.ini
+newton_ws/data/policy/apg_25hz_3wp/last.pt

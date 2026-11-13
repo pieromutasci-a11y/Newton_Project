@@ -1,0 +1,24 @@
+# Rete del controllore di posizione (policy deterministica, addestrata con differentiable learning).
+# Architettura ripresa dal progetto Isaac Lab (skrl_ppo_cfg.yaml: layer [256, 128, 64], ELU),
+# ma senza deviazione standard né critic: la rete produce direttamente le azioni.
+mlp:
+  # Osservazioni (18), nell'ordine in cui le costruisce PosControllerEnv.observations():
+  #   errore di posizione nel sistema del corpo (3) + sin/cos dell'errore di yaw (2)
+  #   + velocità lineare nel corpo (3) + velocità angolare nel corpo (3)
+  #   + gravità proiettata nel corpo (3) + azione precedente (4)
+  # Deve coincidere con PosControllerEnv.obs_dim (controllato all'avvio del training).
+  input_dim: 18
+
+  # Azioni (4), normalizzate in [-1, 1]: spinta, momento x, momento y, momento z.
+  # Deve coincidere con PosControllerEnv.action_dim.
+  output_dim: 4
+
+  # Normalizzazione delle osservazioni con media e varianza mobili, come lo state_preprocessor
+  # RunningStandardScaler di skrl in Isaac Lab. Le statistiche si aggiornano solo in training e
+  # vengono salvate nei checkpoint. Mettere false per disattivarla (utile per un confronto).
+  normalize_obs: true
+  obs_clip: 5.0  # le osservazioni normalizzate vengono limitate a [-obs_clip, +obs_clip]
+
+  hidden_layers: [256, 128, 64]
+  activation: elu          # elu | relu | tanh
+  output_activation: tanh  # tiene le azioni in [-1, 1] (e il gradiente vivo, a differenza di un clamp)

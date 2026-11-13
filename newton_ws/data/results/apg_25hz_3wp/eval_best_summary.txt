@@ -1,0 +1,13 @@
+apg_25hz_3wp (best.pt) - valutazione, drone 0, 40 ms/passo
+passi di controllo registrati: 314 (12.5 s)
+
+                     min        max     limite
+spinta [N]          0.020     1.490   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0094   +0.0110   ±0.0210
+momento y [N·m]   -0.0041   +0.0052   ±0.0210
+momento z [N·m]   -0.0085   +0.0084   ±0.0085
+
+|v lineare| max nel corpo [m/s]:  x 3.17  y 2.07  z 1.67   (norma max 3.27)
+|ω| max nel corpo [rad/s]:       x 7.53  y 3.01  z 6.74
+
+passi con comando oltre il 95% del limite:  spinta 0.3%  Mx 0.0%  My 0.0%  Mz 3.2%
