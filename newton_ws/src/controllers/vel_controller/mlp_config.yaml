@@ -1,0 +1,23 @@
+# Rete del controllore di velocità (policy deterministica, addestrata con APG, separata da quella della posizione).
+# Architettura ripresa dal progetto Isaac Lab (skrl_ppo_cfg.yaml: layer [256, 128, 64], ELU),
+# ma senza deviazione standard né critic: la rete produce direttamente le azioni.
+mlp:
+  # Osservazioni (17), nell'ordine in cui le costruisce VelControllerEnv.observations():
+  #   velocità lineare nel corpo (3) + velocità angolare nel corpo (3) + gravità proiettata nel corpo (3)
+  #   + azione precedente (4) + riferimento di velocità (4: vx, vy, vz, wz nel corpo)
+  # Deve coincidere con VelControllerEnv.obs_dim (controllato all'avvio del training).
+  input_dim: 17
+
+  # Azioni (4), normalizzate in [-1, 1]: spinta, momento x, momento y, momento z.
+  # Deve coincidere con VelControllerEnv.action_dim.
+  output_dim: 4
+
+  # Normalizzazione delle osservazioni con media e varianza mobili, come lo state_preprocessor
+  # RunningStandardScaler di skrl in Isaac Lab. Le statistiche si aggiornano solo in training e
+  # vengono salvate nei checkpoint. Mettere false per disattivarla (utile per un confronto).
+  normalize_obs: true
+  obs_clip: 5.0  # le osservazioni normalizzate vengono limitate a [-obs_clip, +obs_clip]
+
+  hidden_layers: [256, 128, 64]
+  activation: elu          # elu | relu | tanh
+  output_activation: tanh  # tiene le azioni in [-1, 1] (e il gradiente vivo, a differenza di un clamp)

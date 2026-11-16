@@ -36,7 +36,7 @@ class CostWeights:
     yaw_prec_beta: float = 7.0
 
     # --- Velocità ---
-    ang_vel_xy: float = 0.01  # roll/pitch^2; Isaac Lab: 0, ma qui si comandano i momenti, quindi serve (0.002 -> 0.01: meno tremolio)
+    ang_vel_xy: float = 0.045  # roll/pitch^2; Isaac Lab: 0, ma qui si comandano i momenti, quindi serve (0.002 -> 0.01: meno tremolio), 0.01 troppo aggressivo, 0.08 molto smooth
     ang_vel_z: float = 0.002  # yaw^2, più pesante vicino al target (come in Isaac Lab)
     lin_vel: float = 0.1  # smorzamento generale / limite di velocità (0.01 -> 0.1: a 3 m/s costava solo 0.1 per passo)
     lin_vel_brake: float = 0.5  # frenata vicino al target (in Isaac Lab solo per la modalità uniciclo)
@@ -55,6 +55,13 @@ class CostWeights:
 def make_hover_action(params: DroneParams, device) -> torch.Tensor:
     """Azione di hover: spinta pari al peso, momenti nulli. Con thrust_to_weight = 1.8 è (0.111, 0, 0, 0)."""
     return torch.tensor([2.0 / params.thrust_to_weight - 1.0, 0.0, 0.0, 0.0], device=device)
+
+
+def make_hover_command(device) -> torch.Tensor:
+    """Comando di hover per la cascata: riferimenti di velocità tutti nulli (vx = vy = vz = wz = 0).
+    È il riferimento del termine `effort` quando le azioni sono riferimenti di velocità (make_hover_action vale
+    invece per azioni di spinta e momenti, cioè senza la rete di velocità)."""
+    return torch.zeros(4, device=device)
 
 
 def _smooth_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -76,9 +83,9 @@ def cost_function(
     """Costo di un passo per ogni mondo.
 
     errors       : env.errors() dopo il passo
-    actions      : (N, 4) azioni appena applicate
+    actions      : (N, 4) azioni appena applicate: riferimenti di velocità normalizzati in [-1, 1]
     prev_actions : (N, 4) azioni del passo precedente (env.prev_actions letto PRIMA di env.step)
-    hover_action : (4,) vedi make_hover_action
+    hover_action : (4,) comando di hover: make_hover_command (riferimenti di velocità nulli) per la cascata
     Ritorna (costo totale (N,), dizionario dei singoli termini (N,) per i log).
     """
     w = w or CostWeights()

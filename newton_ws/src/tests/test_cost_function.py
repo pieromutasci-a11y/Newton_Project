@@ -16,12 +16,12 @@ from controllers.pos_controller.pos_controller_env import Errors, PosControllerE
 from controllers.pos_controller.pos_controller_mlp import PosControllerMLP
 from drone_model.params import DroneParams
 from scene.train_world import TrainWorld, TrainWorldConfig
-from train.cost_function import CostWeights, cost_function, make_hover_action
+from train.cost_function_pos_controller import CostWeights, cost_function, make_hover_command
 
 dev = "cuda:0"
 params = DroneParams()
-hover = make_hover_action(params, dev)
-print("azione di hover:", [round(float(v), 4) for v in hover])
+hover = make_hover_command(dev)  # comando di hover della cascata: riferimenti di velocità nulli
+print("comando di hover (riferimenti di velocità):", [round(float(v), 4) for v in hover])
 
 
 def make_errors(n=1, dist=0.0, yaw=0.0, tilt_deg=0.0, ang=0.0, lin=0.0, requires_grad=False):
@@ -95,10 +95,14 @@ print(f"  d costo / d (gravity_b z) a 60 gradi     = {float(e.gravity_b.grad[0, 
 
 # ---------------------------------------------------------------- 4. costo reale dall'env, con la rete iniziale
 print("\n== 4. Costo reale: rete iniziale, 4096 mondi, finestra di 32 passi")
-N, H = 4096, 32
-world = TrainWorld(params, TrainWorldConfig(num_worlds=N, horizon=H))
-env = PosControllerEnv(world, seed=3)
-policy = PosControllerMLP().to(dev)
+# Rete di velocità congelata sotto il controllore di posizione: la v7 se c'è, altrimenti una rete casuale (la struttura si prova lo stesso)
+VEL_CKPT = os.path.join(os.path.dirname(__file__), "..", "..", "data", "vel_controller", "policy", "apg_vel_v7", "best.pt")
+VEL_CKPT = VEL_CKPT if os.path.isfile(VEL_CKPT) else None
+print("rete di velocità:", "apg_vel_v7/best.pt" if VEL_CKPT else "CASUALE (apg_vel_v7 non trovata)")
+N, H = 4096, 32  # H = passi di posizione; il mondo ha 2 passi per ognuno
+world = TrainWorld(params, TrainWorldConfig(num_worlds=N, horizon=2 * H, decimation=2))
+policy = PosControllerMLP(vel_ckpt=VEL_CKPT).to(dev)
+env = PosControllerEnv(world, policy.vel_policy, seed=3)
 obs = env.observations()
 sums = None
 loss = 0.0
@@ -117,5 +121,5 @@ print(f"  loss (media sulla finestra) = {float(loss.detach()):.4f}")
 print("  contributo medio di ogni termine al costo per passo:")
 for k, v in sorted(sums.items(), key=lambda kv: -float(kv[1])):
     print(f"    {k:14s} {float(v):8.4f}")
-grads = [p.grad for p in policy.parameters()]
+grads = [p.grad for p in policy.parameters() if p.requires_grad]
 print("  gradienti sui pesi della rete finiti:", all(torch.isfinite(g).all() for g in grads))

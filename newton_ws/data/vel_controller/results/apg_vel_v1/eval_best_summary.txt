@@ -1,0 +1,22 @@
+apg_vel_v1 (best.pt) - valutazione velocità, drone 0, 20 ms/passo
+passi di controllo registrati: 583 (11.6 s a 50 Hz), 3 riferimenti
+
+errore di velocità (reale - riferimento), RMS su tutta la prova:
+  vx 0.104 m/s | vy 0.081 m/s | vz 0.125 m/s | wz 0.078 rad/s
+
+per ogni riferimento: valore e errore medio assoluto negli ultimi 0.5 s (a regime)
+  1) rif (-0.00, +0.00, -0.83) m/s, wz +0.00 rad/s [0.0-3.8 s] | errore a regime: 0.009, 0.000, 0.027 m/s, 0.001 rad/s
+  2) rif (+0.06, -0.64, +0.57) m/s, wz +1.35 rad/s [3.8-7.4 s] | errore a regime: 0.006, 0.084, 0.037 m/s, 0.005 rad/s
+  3) rif (+0.98, -0.77, -0.86) m/s, wz -1.06 rad/s [7.5-11.7 s] | errore a regime: 0.093, 0.075, 0.034 m/s, 0.015 rad/s
+
+                     min        max     limite
+spinta [N]          0.000     1.536   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0133   +0.0202   ±0.0210
+momento y [N·m]   -0.0054   +0.0101   ±0.0210
+momento z [N·m]   -0.0085   +0.0082   ±0.0085
+
+velocità lineare max nel corpo [m/s]: x 0.98  y 0.74  z 0.88
+|ω| max nel corpo [rad/s]:             x 5.63  y 3.37  z 1.38
+inclinazione massima: 22.7 gradi
+
+passi con comando oltre il 95% del limite:  spinta 2.9%  Mx 0.2%  My 0.0%  Mz 0.5%

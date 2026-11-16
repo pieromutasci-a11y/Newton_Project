@@ -1,11 +1,18 @@
-"""Controllore di posizione: una MLP semplice che trasforma le osservazioni in azioni.
+"""Controllore di posizione: una MLP semplice che trasforma le osservazioni in riferimenti di velocità.
 
 Policy DETERMINISTICA: nessuna distribuzione gaussiana, nessun critic. Viene addestrata
 facendo passare il gradiente del costo attraverso il simulatore differenziabile
 (analytic policy gradient / BPTT), non con PPO.
 
-Dimensioni, struttura degli strati e normalizzazione: mlp_config.yaml.
-Uscita: azioni in [-1, 1] = [spinta, momento x, momento y, momento z].
+Controllo a CASCATA, come in Isaac Lab: l'uscita di questa rete non è spinta e momenti, ma i 4 riferimenti di
+velocità (vx, vy, vz, wz) normalizzati in [-1, 1] (l'env li moltiplica per la scala: ±1 m/s e ±1.5 rad/s). A
+trasformarli in spinta e momenti ci pensa la rete di VELOCITÀ, già addestrata, che qui sta dentro come `vel_policy`:
+CONGELATA (parametri senza gradiente, sempre in eval(), statistiche di normalizzazione fisse) ma attraversata dal
+gradiente verso i riferimenti. Salvando il checkpoint della posizione si salva anche la rete di velocità.
+
+Dimensioni, struttura degli strati e normalizzazione: mlp_config.yaml (rete di posizione) e
+controllers/vel_controller/mlp_config.yaml (rete di velocità).
+Uscita: riferimenti di velocità normalizzati in [-1, 1] = [vx, vy, vz, wz].
 """
 
 import os
@@ -13,6 +20,8 @@ import os
 import torch
 import yaml
 from torch import nn
+
+from ..vel_controller.vel_controller_mlp import VelControllerMLP
 
 DEFAULT_MLP_YAML = os.path.join(os.path.dirname(__file__), "mlp_config.yaml")
 
@@ -26,7 +35,10 @@ _ACTIVATIONS = {
 
 
 class PosControllerMLP(nn.Module):
-    def __init__(self, mlp_yaml: str = DEFAULT_MLP_YAML):
+    def __init__(self, mlp_yaml: str = DEFAULT_MLP_YAML, vel_ckpt: str | None = None):
+        """vel_ckpt: checkpoint della rete di velocità da caricare (data/vel_controller/policy/<run>/best.pt).
+        Se None la rete di velocità resta con pesi casuali: va bene quando poi si carica un checkpoint della posizione,
+        che contiene già anche i pesi della rete di velocità."""
         super().__init__()
 
         with open(mlp_yaml) as f:
@@ -56,11 +68,34 @@ class PosControllerMLP(nn.Module):
         layers.append(_ACTIVATIONS[mlp["output_activation"]]())
         self.net = nn.Sequential(*layers)
 
-        # Inizializzazione dello strato di uscita con pesi piccoli: all'inizio le azioni sono ~0.
-        # Con azione di spinta = 0 la spinta vale 0.5 * max_thrust = 0.9 * peso (thrust_to_weight = 1.8):
-        # il drone parte quasi in hover e il training non comincia da una caduta libera.
+        # Inizializzazione dello strato di uscita con pesi piccoli: all'inizio i riferimenti di velocità sono ~0,
+        # quindi (con la rete di velocità sotto) il drone parte in hover e il training non comincia da una caduta.
         nn.init.uniform_(out_layer.weight, -1e-2, 1e-2)
         nn.init.zeros_(out_layer.bias)
+
+        # Rete di velocità (anello interno): congelata. Sta qui dentro per due motivi: viaggia nel checkpoint della
+        # posizione, e train()/eval() della posizione non possono mai riattivarla (vedi train()).
+        self.vel_policy = VelControllerMLP()
+        self.vel_policy.requires_grad_(False)
+        self.vel_policy.eval()
+        if vel_ckpt is not None:
+            self.load_vel_policy(vel_ckpt)
+
+    def load_vel_policy(self, ckpt_path: str) -> dict:
+        """Carica i pesi (e le statistiche di normalizzazione) della rete di velocità e la congela. Ritorna il
+        checkpoint (iterazione, pesi del costo, ... ) per poterne registrare la provenienza."""
+        ckpt = torch.load(ckpt_path, map_location=self.obs_mean.device)
+        self.vel_policy.load_state_dict(ckpt["policy"])
+        self.vel_policy.requires_grad_(False)
+        self.vel_policy.eval()
+        return ckpt
+
+    def train(self, mode: bool = True):
+        """Come nn.Module.train, ma la rete di velocità resta SEMPRE in eval(): congelata, con le statistiche di
+        normalizzazione che non si aggiornano mai mentre si addestra la posizione."""
+        super().train(mode)
+        self.vel_policy.eval()
+        return self
 
     @torch.no_grad()
     def _update_obs_stats(self, obs: torch.Tensor) -> None:
@@ -93,7 +128,7 @@ class PosControllerMLP(nn.Module):
         return torch.clamp(normalized, -self.obs_clip, self.obs_clip)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """obs: (n_droni, input_dim) -> azioni: (n_droni, output_dim)."""
+        """obs: (n_droni, input_dim) -> riferimenti di velocità normalizzati (n_droni, output_dim) in [-1, 1]."""
         if self.normalize_obs:
             obs = self._normalize(obs)
         return self.net(obs)

@@ -4,13 +4,20 @@ La rete (best.pt o last.pt) comanda i droni, i riferimenti sono pallini nello sp
 collega al drone corrispondente). Stessa fisica e stesso env del training, ma senza gradienti.
 
 Uso (nel container, serve il display X11 di run.sh):
-    python /workspace/project_workspace/src/eval/eval_policy.py --run apg_obsfix_h32
-    python /workspace/project_workspace/src/eval/eval_policy.py --run apg_obsfix_h32 --ckpt last --num_drones 6
+    python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome>
+    python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --ckpt last --num_drones 6
+
+Riferimento scelto a mano: con --x --y --z --yaw (metri e GRADI, nel sistema del mondo) il riferimento è FISSO per
+tutta la prova; gli assi non indicati restano quelli di partenza del drone (yaw di partenza: 0). La prova dura
+--duration secondi (default 10). Senza nessuno dei quattro, la sequenza di riferimenti è casuale come sopra:
+    python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --x 1.0 --y -0.5 --z 1.2
+    python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --z 1.5 --yaw 90 --duration 15
 
 Senza display: --viewer null (stampa solo le metriche).
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -26,10 +33,10 @@ from controllers.pos_controller.pos_controller_env import PosControllerEnv, yaw_
 from controllers.pos_controller.pos_controller_mlp import PosControllerMLP
 from controllers.pos_controller.target_handler import TargetHandler
 from drone_model.params import DroneParams
-from eval.plots import save_eval_plots
+from eval.plots_pos_controller import save_eval_plots
 from scene.train_world import TrainWorld, TrainWorldConfig
 
-DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "pos_controller"))
 TARGET_COLOR = (1.0, 0.85, 0.1)  # giallo
 TARGET_RADIUS = 0.07  # m
 LINK_COLOR = (0.6, 0.6, 0.6)
@@ -44,29 +51,60 @@ class Example:
         self.viewer = viewer
         dev = "cuda:0"
 
-        # Mondo con l'aspetto da quadricottero; horizon=1 perché non serve la finestra di backprop
+        # Mondo con l'aspetto da quadricottero, a 50 Hz (decimation 2: il passo della rete di velocità). La rete di posizione
+        # agisce ogni 2 passi del mondo (25 Hz): horizon=2, perché non serve la finestra di backprop ma ogni passo di
+        # posizione ne fa 2 del mondo prima di staccare dal grafo.
         self.world = TrainWorld(
-            DroneParams(), TrainWorldConfig(num_worlds=args.num_drones, horizon=1, visual=True)
+            DroneParams(), TrainWorldConfig(num_worlds=args.num_drones, horizon=2, decimation=2, visual=True)
         )
+        # Seme diverso a ogni lancio: riferimenti e posizione di partenza sono sempre nuovi.
+        # Per ripetere una prova basta passare lo stesso seme con --seed N (viene stampato qui sotto e nel titolo dei grafici).
+        self.seed = args.seed if args.seed is not None else int(time.time() * 1000) % (2**31)
+        print(f"Seed: {self.seed} (per ripetere gli stessi riferimenti: --seed {self.seed})")
+
         # Coda di riferimenti (stessa logica del training: si avanza quando il drone arriva e ci resta 1.2 s).
         # Nessun reset in valutazione: la sequenza viene percorsa una volta sola e poi la valutazione si chiude.
-        targets = TargetHandler(args.num_drones, dev, seed=args.seed, n_waypoints=args.n_waypoints)
-        self.env = PosControllerEnv(self.world, targets, seed=args.seed)
+        given = [args.x, args.y, args.z, args.yaw]
+        self.fixed = any(v is not None for v in given)  # riferimento scelto a mano: uno solo, fisso
+        targets = TargetHandler(args.num_drones, dev, seed=self.seed, n_waypoints=1 if self.fixed else args.n_waypoints)
+
+        # Rete addestrata: posizione + rete di velocità congelata (nello stesso checkpoint, con le statistiche di normalizzazione)
+        ckpt_path = os.path.join(args.data_dir, "policy", args.run, f"{args.ckpt}.pt")
+        ckpt = torch.load(ckpt_path, map_location=dev)
+        self.policy = PosControllerMLP().to(dev)
+        self.policy.load_state_dict(ckpt["policy"])
+        self.policy.eval()
+        print(
+            f"Policy: {ckpt_path} (iterazione {ckpt['iteration']}; rete di velocità: {ckpt.get('vel_run', '?')}, "
+            f"iterazione {ckpt.get('vel_iteration', '?')})"
+        )
+
+        self.env = PosControllerEnv(self.world, self.policy.vel_policy, targets, seed=self.seed)
+        if self.fixed:
+            # Gli assi non indicati restano quelli di partenza di ogni drone (la partenza è casuale: si legge dopo la creazione dell'env)
+            start = self.world.pos.detach().clone()
+            target = torch.stack(
+                [start[:, i] if v is None else torch.full_like(start[:, i], float(v)) for i, v in enumerate(given[:3])], dim=-1
+            )
+            yaw = torch.zeros(args.num_drones, device=dev) if args.yaw is None else torch.full((args.num_drones,), math.radians(args.yaw), device=dev)
+            targets.set_constant(target, yaw)
+            out = [n for n, v, lo, hi in (("x", args.x, -1.5, 1.5), ("y", args.y, -1.5, 1.5), ("z", args.z, 0.5, 1.5)) if v is not None and not lo <= v <= hi]
+            if out:
+                print(f"ATTENZIONE: {', '.join(out)} fuori dal campo del training (x, y in ±1.5 m, z in 0.5-1.5 m): la rete non ha visto questi valori")
+            if args.yaw is not None and 0 < abs(args.yaw) <= 2 * math.pi:
+                print(f"ATTENZIONE: --yaw è in GRADI: {args.yaw} sono {args.yaw:.1f}°, quasi zero. Se intendevi radianti, scrivi --yaw {math.degrees(args.yaw):.0f}")
+            d0 = 0
+            print(
+                f"Riferimento FISSO per {args.duration:.0f} s (drone 0): x {float(target[d0, 0]):+.2f}  y {float(target[d0, 1]):+.2f}  "
+                f"z {float(target[d0, 2]):+.2f} m,  yaw {math.degrees(float(yaw[d0])):+.0f}°  (partenza x {float(start[d0, 0]):+.2f}  y {float(start[d0, 1]):+.2f}  z {float(start[d0, 2]):+.2f})"
+            )
         self.finished = False
         self.args = args
         self.params = DroneParams()
         self.plot_drone = args.plot_drone
-        self.rec = []  # una riga per passo di controllo del drone `plot_drone` (colonne: vedi eval/plots.py)
+        self.rec = []  # una riga per passo di controllo del drone `plot_drone` (colonne: vedi eval/plots_pos_controller.py)
         self.pace = args.pace
         self.t_start = time.perf_counter()
-
-        # Rete addestrata
-        ckpt_path = os.path.join(args.data_dir, "policy", args.run, f"{args.ckpt}.pt")
-        ckpt = torch.load(ckpt_path, map_location=dev)
-        self.policy = PosControllerMLP().to(dev)
-        self.policy.load_state_dict(ckpt["policy"])  # include le statistiche di normalizzazione
-        self.policy.eval()
-        print(f"Policy: {ckpt_path} (iterazione {ckpt['iteration']})")
 
         self.obs = self.env.observations()
         self.sim_time = 0.0
@@ -95,39 +133,44 @@ class Example:
         e = self.env.errors()
         # Distanza dal riferimento attivo durante il passo (media sui droni)
         self.dist_sum += e.pos_err.norm(dim=-1).mean()
-        # Registrazione del drone `plot_drone`: posa, riferimento (quello attivo nel passo), velocità, azioni
+        # Registrazione del drone `plot_drone`: posa, riferimento (quello attivo nel passo), velocità, spinta e momenti
+        # (le azioni della rete di velocità) e i riferimenti di velocità comandati dalla rete di posizione
         d = self.plot_drone
         pos, tgt = self.world.pos[d], self.env.targets.step_target_pos[d]
         self.rec.append(
             torch.cat(
                 [
-                    torch.tensor([self.sim_time + self.world.ctrl_dt], device=pos.device),
+                    torch.tensor([self.sim_time + self.env.dt], device=pos.device),
                     pos, tgt,
                     yaw_from_quat(self.world.q[d : d + 1, 3:7]),
                     self.env.targets.step_target_yaw[d : d + 1],
-                    e.lin_vel_b[d], e.ang_vel_b[d], actions[d],
+                    e.lin_vel_b[d], e.ang_vel_b[d], self.env.low_prev_actions[d], self.env.v_ref[d],
                 ]
             )
         )
         # Stacca dal grafo (horizon=1) SENZA resettare i mondi: env.end_window() resetterebbe i droni
         self.world.detach()
         self.env.prev_actions = self.env.prev_actions.detach()
+        self.env.low_prev_actions = self.env.low_prev_actions.detach()
         self.obs = self.env.observations()
 
-        self.sim_time += self.world.ctrl_dt
+        self.sim_time += self.env.dt
         self.steps += 1
         if self.pace:  # un passo di controllo = ctrl_dt secondi veri: se la simulazione è in anticipo sull'orologio, aspetta
             ahead = self.t_start + self.sim_time - time.perf_counter()
             if ahead > 0:
                 time.sleep(ahead)
-        if bool(self.env.sequence_done().all()):
+        if self.fixed and self.sim_time >= self.args.duration:
+            print(f"\nRiferimento fisso mantenuto per {self.sim_time:.1f} s: valutazione chiusa.")
+            self.finished = True
+        elif not self.fixed and bool(self.env.sequence_done().all()):
             print(f"\nSequenza di {self.env.targets.n_waypoints} riferimenti completata a t = {self.sim_time:.1f} s.")
             self.finished = True
         elif self.sim_time >= self.args.max_s:
             print(f"\nTempo massimo ({self.args.max_s:.0f} s) raggiunto prima di finire la sequenza: valutazione chiusa.")
             self.finished = True
-        if self.steps % round(1.0 / self.world.ctrl_dt) == 0:  # ogni secondo simulato
-            print(f"t = {self.sim_time:6.1f} s | distanza media dal riferimento {float(self.dist_sum) / round(1.0 / self.world.ctrl_dt):.3f} m | riferimento {int(self.env.targets.wp_idx.max()) + 1}/{self.env.targets.n_waypoints}")
+        if self.steps % round(1.0 / self.env.dt) == 0:  # ogni secondo simulato
+            print(f"t = {self.sim_time:6.1f} s | distanza media dal riferimento {float(self.dist_sum) / round(1.0 / self.env.dt):.3f} m | riferimento {int(self.env.targets.wp_idx.max()) + 1}/{self.env.targets.n_waypoints}")
             self.dist_sum.zero_()
 
     def render(self):
@@ -157,16 +200,17 @@ class Example:
         self.viewer.end_frame()
 
     def save_plots(self):
-        """Salva grafici e riepilogo in data/results/<run>/ (la cartella dei log di quella policy)."""
+        """Salva grafici e riepilogo in data/pos_controller/results/<run>/ (la cartella dei log di quella policy)."""
         if not self.args.plots or len(self.rec) < 2:
             return
         out_dir = os.path.join(self.args.data_dir, "results", self.args.run)
         os.makedirs(out_dir, exist_ok=True)
         base = os.path.join(out_dir, f"eval_{self.args.ckpt}")
         rec = torch.stack(self.rec).cpu().numpy()
-        title = f"{self.args.run} ({self.args.ckpt}.pt) - valutazione, drone {self.plot_drone}, {self.world.ctrl_dt * 1000:.0f} ms/passo"
-        print("\n" + save_eval_plots(rec, self.params, base + ".png", base + "_summary.txt", title))
-        print(f"\nGrafici e riepilogo salvati in {out_dir}/ (eval_{self.args.ckpt}.png, eval_{self.args.ckpt}_summary.txt)")
+        title = f"{self.args.run} ({self.args.ckpt}.pt) - valutazione, drone {self.plot_drone}, seed {self.seed}, {self.env.dt * 1000:.0f} ms/passo"
+        print("\n" + save_eval_plots(rec, self.params, base, base + "_summary.txt", title))
+        k = self.args.ckpt
+        print(f"\nGrafici e riepilogo salvati in {out_dir}/ (eval_{k}_posizione.png, eval_{k}_velocita.png, eval_{k}_spinta_momenti.png, eval_{k}_summary.txt)")
 
     @staticmethod
     def _yaw_tip(pos: torch.Tensor, yaw: torch.Tensor):
@@ -177,13 +221,18 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--run", required=True, help="nome della run in data/policy/")
+    parser.add_argument("--run", required=True, help="nome della run in data/pos_controller/policy/")
     parser.add_argument("--ckpt", choices=["best", "last"], default="best")
     parser.add_argument("--num_drones", type=int, default=1)
+    parser.add_argument("--x", type=float, default=None, help="riferimento fisso di x [m] nel mondo (se indichi uno tra x, y, z, yaw: niente riferimenti casuali)")
+    parser.add_argument("--y", type=float, default=None, help="riferimento fisso di y [m]")
+    parser.add_argument("--z", type=float, default=None, help="riferimento fisso di z [m]")
+    parser.add_argument("--yaw", type=float, default=None, help="riferimento fisso di yaw [GRADI]")
+    parser.add_argument("--duration", type=float, default=10.0, help="durata della prova con riferimento fisso [s]")
     parser.add_argument("--n_waypoints", type=int, default=5, help="riferimenti da raggiungere prima di chiudere")
     parser.add_argument("--max_s", type=float, default=120.0, help="tempo massimo di simulazione [s], per non restare bloccati")
     parser.add_argument("--pace", action=argparse.BooleanOptionalAction, default=True, help="simula a tempo reale")
-    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--seed", type=int, default=None, help="seme dei riferimenti (default: casuale a ogni lancio)")
     parser.add_argument("--plot_drone", type=int, default=0, help="quale drone registrare per i grafici")
     parser.add_argument("--plots", action=argparse.BooleanOptionalAction, default=True, help="salva i grafici alla fine")
     parser.add_argument("--data_dir", type=str, default=DEFAULT_DATA_DIR)

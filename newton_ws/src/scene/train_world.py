@@ -35,6 +35,7 @@ class TrainWorldConfig:
     decimation: int = 4  # passi di fisica per ogni passo di controllo (4 -> rete a 25 Hz, come in Isaac Lab)
     horizon: int = 32  # passi di CONTROLLO per finestra di backpropagation (troncamento)
     visual: bool = False  # aspetto da quadricottero (solo per la visualizzazione; nel training resta False)
+    ground: bool = True  # pavimento disegnato (solo con visual=True; la fisica non ha contatti)
 
 
 class _SimStep(torch.autograd.Function):
@@ -117,7 +118,7 @@ class TrainWorld:
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=gravity)
         builder.replicate(single, copy_count=n)
-        if self.cfg.visual:
+        if self.cfg.visual and self.cfg.ground:
             builder.add_ground_plane()  # solo grafico: il solver del training non usa contatti
 
         # requires_grad=True: il modello e gli stati hanno anche gli array dei gradienti

@@ -1,17 +1,25 @@
 """Ambiente del controllore di posizione.
 
-Mette insieme il mondo fisico (scene/train_world.py) e i riferimenti (target_handler.py). Si occupa di:
-applicare le azioni, calcolare gli errori, costruire le osservazioni per la rete, e tutta la gestione
-di terminazioni, spawn e reset. Il costo NON sta qui: si calcola in train/cost_function.py a partire
-dagli errori di questo env.
+Controllo a CASCATA, come in Isaac Lab. Le azioni di questo env sono i 4 riferimenti di velocità (vx, vy, vz, wz)
+normalizzati in [-1, 1]; a ogni passo (25 Hz) l'env li moltiplica per la scala e li passa alla rete di velocità
+`low_level` (congelata, 50 Hz), che li trasforma in spinta e momenti: per ogni passo di posizione la rete di velocità
+agisce 2 volte, con 2 passi di fisica ciascuna.
 
-Non conosce la rete né l'ottimizzatore, e non vede Warp: parla solo con tensori PyTorch.
+Mette insieme il mondo fisico (scene/train_world.py, da creare con decimation=2: 50 Hz), la rete di velocità e i
+riferimenti di posizione (target_handler.py). Si occupa di: far agire la cascata, calcolare gli errori, costruire le
+osservazioni per la rete di posizione, e tutta la gestione di terminazioni, spawn e reset. Il costo NON sta qui: si
+calcola in train/cost_function_pos_controller.py a partire dagli errori di questo env.
 
-Uso tipico (un'iterazione di training = una finestra di `horizon` passi):
+Non conosce l'ottimizzatore e non vede Warp: parla solo con tensori PyTorch. La rete di velocità gli arriva come una
+semplice funzione (vel_obs (N,17) -> azioni (N,4)), di solito PosControllerMLP.vel_policy.
 
+Uso tipico (un'iterazione di training = una finestra di `horizon` passi di posizione):
+
+    world = TrainWorld(params, TrainWorldConfig(num_worlds=N, decimation=2, horizon=2 * horizon))
+    env = PosControllerEnv(world, policy.vel_policy)
     obs = env.observations()
     for t in range(horizon):
-        actions = policy(obs)
+        actions = policy(obs)                 # riferimenti di velocità normalizzati
         prev_actions = env.prev_actions       # azione del passo precedente (da leggere PRIMA di step)
         obs = env.step(actions)
         errors = env.errors()                 # per il costo
@@ -26,22 +34,11 @@ import torch
 
 from scene.train_world import TrainWorld
 
+from ..math_utils import quat_rotate_inverse, yaw_from_quat  # noqa: F401 (riesportate: i test le importano da qui)
+from ..vel_controller.vel_controller_env import vel_observations
 from .target_handler import TargetHandler
 
-
-def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Ruota il vettore v (nel mondo) nel sistema del corpo. q: (N, 4) come (x, y, z, w), v: (N, 3)."""
-    q_vec, q_w = q[:, :3], q[:, 3:4]
-    a = v * (2.0 * q_w**2 - 1.0)
-    b = torch.cross(q_vec, v, dim=-1) * q_w * 2.0
-    c = q_vec * (q_vec * v).sum(dim=-1, keepdim=True) * 2.0
-    return a - b + c
-
-
-def yaw_from_quat(q: torch.Tensor) -> torch.Tensor:
-    """Angolo di imbardata (rotazione attorno a z del mondo) da un quaternione (x, y, z, w)."""
-    x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+LOW_LEVEL_DT = 0.02  # s: la rete di velocità è addestrata a 50 Hz (fisica a 100 Hz con decimation 2)
 
 
 @dataclass
@@ -61,12 +58,14 @@ class PosControllerEnv:
     #   + gravità proiettata nel corpo (3) + azione precedente (4)
     # Devono coincidere con input_dim e output_dim di mlp_config.yaml.
     obs_dim = 18
-    # Azioni (4), normalizzate in [-1, 1]: spinta, momento x, momento y, momento z (vedi drone_model/actuators.py)
+    # Azioni (4), normalizzate in [-1, 1]: riferimenti di velocità vx, vy, vz, wz nel sistema del corpo; l'env li
+    # moltiplica per vel_scale (m/s e rad/s) e li dà alla rete di velocità, che produce spinta e momenti.
     action_dim = 4
 
     def __init__(
         self,
         world: TrainWorld,
+        low_level,
         targets: TargetHandler | None = None,
         *,
         seed: int = 0,
@@ -80,11 +79,24 @@ class PosControllerEnv:
         reach_threshold: float = 0.15,  # m
         reach_yaw_threshold: float = 0.20,  # rad
         hold_time_s: float = 1.2,  # s
+        control_dt: float = 0.04,  # s, intervallo di controllo della rete di posizione (25 Hz, come Isaac Lab)
+        # Scala dei riferimenti di velocità: stesso campo su cui è stata addestrata la rete di velocità
+        # (Isaac Lab: target_lin_vel_xy_scale = target_lin_vel_z_scale = 1.0 m/s, target_yaw_vel_scale = 1.5 rad/s)
+        vel_scale: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.5),
     ):
         self.world = world
+        self.low_level = low_level  # rete di velocità (congelata): osservazioni (N,17) -> azioni (N,4)
         self.n = world.cfg.num_worlds
-        self.dt = world.ctrl_dt  # intervallo di controllo [s] (25 Hz con decimation 4)
         self.device = world.q.device
+        assert abs(world.ctrl_dt - LOW_LEVEL_DT) < 1e-9, (
+            f"il mondo deve avere un passo di controllo di {LOW_LEVEL_DT} s (50 Hz, decimation=2), non {world.ctrl_dt} s: "
+            "è la frequenza a cui è stata addestrata la rete di velocità"
+        )
+        # Passi della rete di velocità per ogni passo di posizione (2: 50 Hz contro 25 Hz)
+        self.n_sub = round(control_dt / world.ctrl_dt)
+        assert abs(self.n_sub * world.ctrl_dt - control_dt) < 1e-9, "control_dt deve essere un multiplo di 0.02 s"
+        self.dt = control_dt  # intervallo di controllo della posizione [s]
+        self.vel_scale = torch.tensor(vel_scale, device=self.device)
 
         # Riferimenti: se non ne viene passato uno, si usa quello di default (intervalli in target_handler.py)
         self.targets = targets or TargetHandler(self.n, self.device, seed=seed)
@@ -104,8 +116,11 @@ class PosControllerEnv:
 
         self._gravity_dir = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.n, 3)
 
-        # Azione applicata al passo precedente (serve alle osservazioni e al costo sulla variazione delle azioni)
+        # Azione (riferimenti di velocità normalizzati) del passo precedente: serve alle osservazioni e al costo
         self.prev_actions = torch.zeros(self.n, self.action_dim, device=self.device)
+        # Ultima azione della rete di velocità (spinta e momenti): serve alle sue osservazioni (e ai grafici)
+        self.low_prev_actions = torch.zeros(self.n, 4, device=self.device)
+        self.v_ref = torch.zeros(self.n, 4, device=self.device)  # ultimi riferimenti di velocità [m/s, rad/s] (per i log)
         self._steps_alive = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self._hold_timer = torch.zeros(self.n, device=self.device)  # s trascorsi sul riferimento attivo, entro le soglie
 
@@ -114,13 +129,22 @@ class PosControllerEnv:
 
     # ------------------------------------------------------------------ passo
     def step(self, actions: torch.Tensor) -> torch.Tensor:
-        """Applica le azioni (N, 4), avanza di un passo e restituisce le osservazioni (N, obs_dim).
+        """Applica i riferimenti di velocità (N, 4) normalizzati, avanza di un passo (0.04 s) e restituisce le
+        osservazioni (N, obs_dim).
+
+        Per ogni passo la rete di velocità agisce `n_sub` volte (2): ogni volta legge lo stato, il riferimento e la sua
+        azione precedente, produce spinta e momenti, e il mondo avanza di 0.02 s (2 passi di fisica) tenendoli costanti.
 
         Dopo la chiamata: lo stato nuovo è in self.world.q / self.world.qd, e self.errors() dà gli errori
         rispetto al riferimento attivo durante il passo. L'azione precedente va letta PRIMA della chiamata
         (self.prev_actions viene aggiornata con `actions`).
         """
-        self.world.step(actions)
+        self.v_ref = torch.clamp(actions, -1.0, 1.0) * self.vel_scale  # (N, 4) m/s e rad/s, nel corpo
+        for _ in range(self.n_sub):
+            vel_obs = vel_observations(self.world.q, self.world.qd, self._gravity_dir, self.low_prev_actions, self.v_ref)
+            wrench = self.low_level(vel_obs)  # spinta e momenti normalizzati, in [-1, 1]
+            self.world.step(wrench)
+            self.low_prev_actions = wrench
         self.targets.step()  # memorizza il riferimento attivo durante il passo (per il costo)
         self._update_waypoints()  # eventuale avanzamento al riferimento successivo: lo vedrà la rete al passo dopo
         self.prev_actions = actions
@@ -201,6 +225,8 @@ class PosControllerEnv:
         self._hold_timer[ids] = 0.0
         self.prev_actions = self.prev_actions.clone()
         self.prev_actions[ids] = 0.0
+        self.low_prev_actions = self.low_prev_actions.clone()
+        self.low_prev_actions[ids] = 0.0
 
     def done(self) -> torch.Tensor:
         """(N,) bool: mondi da resettare: inclinazione eccessiva, episodio troppo lungo, drone perso o stato esploso."""
@@ -221,5 +247,6 @@ class PosControllerEnv:
         finished = self.done().nonzero(as_tuple=False).squeeze(-1)
         self.world.detach()
         self.prev_actions = self.prev_actions.detach()
+        self.low_prev_actions = self.low_prev_actions.detach()
         if finished.numel() > 0:
             self._reset_worlds(finished)

@@ -20,9 +20,15 @@ from scene.train_world import TrainWorld, TrainWorldConfig
 
 dev = "cuda:0"
 
-N, H = 4096, 32
-world = TrainWorld(DroneParams(), TrainWorldConfig(num_worlds=N, horizon=H))
-env = PosControllerEnv(world, seed=1)
+# Rete di velocità congelata sotto il controllore di posizione: la v7 se c'è, altrimenti una rete casuale (la struttura si prova lo stesso)
+VEL_CKPT = os.path.join(os.path.dirname(__file__), "..", "..", "data", "vel_controller", "policy", "apg_vel_v7", "best.pt")
+VEL_CKPT = VEL_CKPT if os.path.isfile(VEL_CKPT) else None
+print("rete di velocità:", "apg_vel_v7/best.pt" if VEL_CKPT else "CASUALE (apg_vel_v7 non trovata)")
+
+N, H = 4096, 32  # H = passi di POSIZIONE (0.04 s); il mondo ha 2 passi (0.02 s) per ognuno
+world = TrainWorld(DroneParams(), TrainWorldConfig(num_worlds=N, horizon=2 * H, decimation=2))
+policy = PosControllerMLP(vel_ckpt=VEL_CKPT).to(dev)
+env = PosControllerEnv(world, policy.vel_policy, seed=1)
 
 # ---------------------------------------------------------------- 1. riferimenti casuali
 print("== 1. Riferimenti casuali (N =", N, ")")
@@ -63,13 +69,12 @@ del w2
 
 # ---------------------------------------------------------------- 4. iterazione completa (senza ottimizzatore)
 print("\n== 4. Una iterazione completa: rete -> env -> fisica -> errori -> backward")
-policy = PosControllerMLP().to(dev)
 assert policy.input_dim == env.obs_dim and policy.output_dim == env.action_dim, "dimensioni di mlp_config.yaml diverse da quelle dell'env"
 print("  dimensioni rete/env coerenti:", policy.input_dim, "->", policy.output_dim)
 
 
 def temp_cost(env, actions, prev_actions):
-    """Costo PROVVISORIO, solo per questa prova (il costo vero andrà in train/cost_function.py)."""
+    """Costo PROVVISORIO, solo per questa prova (il costo vero andrà in train/cost_function_pos_controller.py)."""
     err = env.errors()
     return err.pos_err.pow(2).sum(-1) + 0.01 * (actions - prev_actions).pow(2).sum(-1)
 
@@ -88,7 +93,7 @@ def one_iteration():
 
 
 loss = one_iteration()
-grads = [p.grad for p in policy.parameters()]
+grads = [p.grad for p in policy.parameters() if p.requires_grad]  # solo la rete di posizione (la rete di velocità è congelata)
 print(f"  loss iniziale = {float(loss.detach()):.4f}")
 print("  gradienti presenti:", all(g is not None for g in grads), "| finiti:", all(torch.isfinite(g).all() for g in grads))
 print(f"  norma del gradiente = {torch.sqrt(sum((g**2).sum() for g in grads)):.4f}")
@@ -121,17 +126,18 @@ print("  done() dopo, mondo 0:", bool(env.done()[0]), "| passi vissuti:", int(en
 # ---------------------------------------------------------------- 6. il costo usa il riferimento attivo durante il passo
 print("\n== 6. Avanzamento: arrivo + permanenza -> riferimento successivo; errors() (costo) usa il vecchio, observations() il nuovo")
 env.end_window()
+env.targets.wp_idx[:] = 0  # con la rete quasi ferma qualche mondo può essere avanzato davvero nelle sezioni precedenti
 env.targets.wp_yaw[:] = 0.0  # yaw di riferimento 0 = yaw dello spawn: così le soglie di arrivo dipendono solo dalla posizione
 env.targets._refresh()
 ids_all = torch.arange(N, device=dev)
 world.reset(ids_all, env.targets.target_pos)  # droni esattamente sul riferimento, dritti e fermi
 env._hold_timer.zero_()
-hover = torch.tensor([0.111, 0.0, 0.0, 0.0], device=dev).repeat(N, 1)
+hover = torch.zeros(N, 4, device=dev)  # riferimenti di velocità nulli: la rete di velocità tiene il drone in hover
 old_target = env.targets.target_pos.clone()
 n_hold = int(round(env._hold_time_s / env.dt))
 steps = 0
 with torch.no_grad():
-    for _ in range(world.cfg.horizon):  # una sola finestra
+    for _ in range(H):  # una sola finestra
         obs = env.step(hover)
         steps += 1
         if int(env.targets.wp_idx.max()) > 0:  # primo passo in cui scatta l'avanzamento
@@ -196,3 +202,18 @@ d = env.done()
 print("  done() segnala NaN (mondo 5) e drone perso (mondo 6):", bool(d[5]), bool(d[6]), "| altri mondi:", int(d[7:].sum()))
 env.end_window()
 print("  dopo end_window lo stato è finito:", bool(torch.isfinite(world.q).all()))
+
+# ---------------------------------------------------------------- 10. riferimento fisso scelto a mano (valutazione)
+print("\n== 10. TargetHandler.set_constant: riferimento fisso, uguale in tutta la coda, che non avanza")
+from controllers.pos_controller.target_handler import TargetHandler  # noqa: E402
+
+th = TargetHandler(6, dev, seed=2, n_waypoints=3)
+tp = torch.tensor([[0.5, -0.5, 1.2]], device=dev).repeat(6, 1)
+tp[3:, 2] = 0.9  # un riferimento diverso per i mondi 3-5
+th.set_constant(tp, math.radians(90.0))
+print("  riferimento attivo = quello imposto:", bool(torch.equal(th.target_pos, tp)), "| yaw 90 gradi:", bool(torch.allclose(th.target_yaw, torch.full((6,), math.pi / 2, device=dev))))
+print("  uguale in tutti i 3 elementi della coda:", bool((th.wp_pos == tp[:, None, :]).all()))
+th.advance(torch.arange(6, device=dev))
+print("  anche dopo advance() resta lo stesso riferimento:", bool(torch.equal(th.target_pos, tp)))
+th.reset(torch.tensor([0], device=dev))
+print("  un reset ricampiona a caso solo quel mondo:", bool((th.target_pos[0] != tp[0]).any() and torch.equal(th.target_pos[1:], tp[1:])))

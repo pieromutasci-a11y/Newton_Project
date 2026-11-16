@@ -86,6 +86,18 @@ class TargetHandler:
         self.wp_pos, self.wp_yaw, self.wp_idx = wp_pos, wp_yaw, wp_idx
         self._refresh()
 
+    def set_constant(self, pos, yaw) -> None:
+        """Imposta un riferimento FISSO (x, y, z, yaw) in tutta la coda di ogni mondo (valutazione con riferimento
+        scelto a mano). pos: (3,) uguale per tutti oppure (N, 3); yaw: scalare [rad] oppure (N,). Il riferimento non
+        avanza né scade; un reset successivo ricampiona a caso quel mondo."""
+        pos = torch.as_tensor(pos, dtype=torch.float32, device=self.device).expand(self.n, 3)
+        yaw = torch.as_tensor(yaw, dtype=torch.float32, device=self.device).expand(self.n)
+        self.wp_pos = pos[:, None, :].repeat(1, self.n_waypoints, 1)
+        self.wp_yaw = yaw[:, None].repeat(1, self.n_waypoints)
+        self.wp_idx = torch.zeros_like(self.wp_idx)
+        self._refresh()
+        self.step_target_pos, self.step_target_yaw = self.target_pos, self.target_yaw
+
     def reset(self, ids: torch.Tensor) -> None:
         """Nuova coda per i mondi appena resettati."""
         self.sample(ids)

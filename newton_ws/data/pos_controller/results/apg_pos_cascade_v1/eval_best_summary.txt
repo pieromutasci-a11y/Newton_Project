@@ -1,0 +1,16 @@
+apg_pos_cascade_v1 (best.pt) - valutazione, drone 0, seed 1687450584, 40 ms/passo
+passi di controllo registrati: 358 (14.3 s)
+
+                     min        max     limite
+spinta [N]          0.007     1.505   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0120   +0.0109   ±0.0210
+momento y [N·m]   -0.0127   +0.0133   ±0.0210
+momento z [N·m]   -0.0056   +0.0057   ±0.0085
+
+|v lineare| max nel corpo [m/s]:  x 0.97  y 1.03  z 0.92   (norma max 1.40)
+|ω| max nel corpo [rad/s]:       x 5.20  y 5.33  z 1.86
+
+riferimenti di velocità comandati dalla rete di posizione (max in modulo, campo ±1, ±1, ±1 m/s e ±1.5 rad/s):
+  vx 1.00  vy 1.00  vz 0.86 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 18.7%  vy 27.9%  vz 0.0%  wz 39.7%
+
+passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  spinta 1.1%  Mx 0.0%  My 0.0%  Mz 0.0%
