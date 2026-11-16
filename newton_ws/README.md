@@ -3,7 +3,7 @@
 Riassunto di dove siamo arrivati e di cosa vogliamo fare, per riprendere il lavoro (anche su un'altra
 macchina o con una nuova sessione di Claude: leggere questo file per primo).
 
-Ultimo aggiornamento: 13/11/2026.
+Ultimo aggiornamento: 16/11/2026.
 
 ## 1. Obiettivo
 
@@ -11,12 +11,16 @@ Addestrare **più droni (multi-agent)** con **Newton** (NVIDIA Warp) e **confron
 con il progetto Isaac Lab** esistente (DJI Tello, PPO/IPPO):
 
 - simulazione e training **interamente su GPU**, senza saturare la CPU;
-- controllore addestrato con **APG** (*analytic policy gradient*): il gradiente del costo passa attraverso la fisica
-  differenziabile fino ai pesi, **senza PPO**, critic né esplorazione;
-- **controllo a cascata** come in Isaac Lab: rete di posizione → riferimenti di velocità → rete di velocità → spinta e momenti.
+- controllori addestrati con **APG** (*analytic policy gradient*): il gradiente del costo passa attraverso la fisica
+  differenziabile fino ai pesi della rete, **senza PPO**, critic né esplorazione;
+- **controllo a cascata** come in Isaac Lab: rete di posizione → 4 riferimenti di velocità → rete di velocità (congelata) → spinta e momenti.
 
-**Dove siamo:** il solo controllore di posizione, che comanda direttamente spinta e momenti (cascata di velocità non ancora fatta),
-per un drone singolo in 4096 mondi paralleli. Funziona: raggiunge sequenze di 3 riferimenti con precisione di pochi cm.
+**Dove siamo:** la cascata è completa per un drone singolo in 4096 mondi paralleli.
+
+1. Controllore di **velocità** addestrato (`apg_vel_v7`, scelto e congelato).
+2. Controllore di **posizione** addestrato sopra la rete di velocità congelata (`apg_pos_cascade_v1..v3`).
+3. Valutazione con GUI e grafici per entrambi.
+
 Il multi-drone vero e proprio (più droni nello stesso mondo) è il passo finale, non ancora iniziato.
 
 ## 2. Ambiente (Docker)
@@ -35,9 +39,8 @@ newton_ws/                             # QUESTO progetto, montato in /workspace/
 Nel container il venv di Newton è il Python di default e `PYTHONPATH` punta a `newton_ws/src`, quindi si lancia
 `python /workspace/project_workspace/src/...` da qualunque cartella.
 
-Requisiti (documentazione di Newton): GPU NVIDIA **Turing o più recente** (compute capability 7.5+) e driver **R580+**
-per Warp 1.18; macchina di lavoro: RTX A1000 (8 GB), driver 580. Una GPU Maxwell (es. MX130) non è supportata dal setup attuale.
-Memoria misurata del training: circa 0.4 GB con 1024 mondi, 0.9 GB con 4096 (orizzonte 32).
+Requisiti: GPU NVIDIA **Turing o più recente** (compute capability 7.5+) e driver **R580+**; macchina di lavoro: RTX A1000 (8 GB), driver 580.
+Una GPU Maxwell (es. MX130) non è supportata da Warp 1.19. Memoria del training di posizione: circa 0.4 GB con 1024 mondi, 0.9 GB con 4096.
 
 ```bash
 ./docker_ws/build.sh        # una volta
@@ -47,44 +50,45 @@ Memoria misurata del training: circa 0.4 GB con 1024 mondi, 0.9 GB con 4096 (ori
 
 ## 3. Struttura del codice (`src/`)
 
-Regola: **Warp solo dentro `TrainWorld`**; sopra (env, costo, rete, training) solo tensori PyTorch.
+Regola: **Warp solo dentro `TrainWorld`** (più il kernel `apply_wrench`); sopra (env, costo, rete, training) solo tensori PyTorch.
 
 ```
 src/
-  drone_model/                        # com'è fatto il drone
+  drone_model/
     params.py                         # DroneParams: massa 0.087 kg, inerzie, thrust/weight 1.8, scale dei momenti (come Isaac Lab)
     actuators.py                      # UNICO kernel Warp nostro: apply_wrench (azioni -> spinta e momenti sul corpo)
     builder.py                        # add_drone: UN corpo rigido + scatola di collisione; con visual=True aspetto da quadricottero
   scene/
-    train_world.py                    # TrainWorld: N mondi, fisica differenziabile, ponte Warp<->PyTorch (_SimStep), decimation (uguale per posizione e velocità)
+    train_world.py                    # TrainWorld: N mondi, fisica differenziabile, ponte Warp<->PyTorch (_SimStep), decimation
     test_world.py                     # mondo singolo con pavimento e XPBD (solo per prove e viewer)
-  controllers/pos_controller/
-    mlp_config.yaml                   # rete: 18 -> [256,128,64] ELU -> 4 tanh, normalizzazione delle osservazioni
-    pos_controller_mlp.py             # PosControllerMLP (deterministica, statistiche mobili) + la rete di velocità CONGELATA dentro (vel_policy)
-    pos_controller_env.py             # PosControllerEnv: cascata (2 passi di rete di velocità per passo di posizione), errori, osservazioni, riferimenti, reset
-    target_handler.py                 # TargetHandler: coda di riferimenti casuali (x, y, z, yaw)
-  controllers/vel_controller/         # controllore di velocità (anello interno, 50 Hz): riferimenti (vx, vy, vz, wz) -> spinta e momenti
-    mlp_config.yaml                   # rete: 17 -> [256,128,64] ELU -> 4 tanh (separata da quella della posizione)
-    vel_controller_mlp.py             # VelControllerMLP (stessa struttura, statistiche mobili, usabile congelata)
-    vel_controller_env.py             # VelControllerEnv: 17 osservazioni, errori di velocità, reset (anche per velocità angolare > 30 rad/s)
-    ref_handler.py                    # RefHandler: riferimenti di velocità a tempo, 5 modalità di Isaac Lab, senza curriculum
-  controllers/math_utils.py           # quat_rotate_inverse, quat_rotate, yaw_from_quat (comuni ai due controllori)
+  controllers/
+    math_utils.py                     # quat_rotate_inverse, quat_rotate, yaw_from_quat (comuni ai due controllori)
+    vel_controller/                   # anello interno, 50 Hz: (vx, vy, vz, wz) -> spinta e momenti
+      mlp_config.yaml                 # rete: 17 -> [256,128,64] ELU -> 4 tanh
+      vel_controller_mlp.py           # VelControllerMLP (statistiche mobili, usabile congelata)
+      vel_controller_env.py           # VelControllerEnv + vel_observations (funzione unica, usata anche dalla cascata)
+      ref_handler.py                  # RefHandler: riferimenti di velocità a tempo, 5 modalità, senza curriculum
+    pos_controller/                   # anello esterno, 25 Hz: posizione e yaw -> 4 riferimenti di velocità
+      mlp_config.yaml                 # rete: 18 -> [256,128,64] ELU -> 4 tanh (separata da quella di velocità)
+      pos_controller_mlp.py           # PosControllerMLP + rete di velocità CONGELATA dentro (vel_policy)
+      pos_controller_env.py           # PosControllerEnv: cascata (2 passi di rete di velocità per passo di posizione)
+      target_handler.py               # TargetHandler: coda di riferimenti casuali (x, y, z, yaw)
   train/
-    cost_function_pos_controller.py   # CostWeights + cost_function (pesi di default = ultimo run, vedi sotto)
-    cost_function_vel_controller.py   # costo di velocità: errore normalizzato + azioni (peso crescente) + assetto
-    train_APG_pos_controller.py       # training della posizione sopra la rete di velocità congelata (--vel_run): finestre di BPTT, tensorboard, checkpoint
-    train_APG_vel_controller.py       # training della velocità (decimation 2: 50 Hz), rampa del peso delle azioni
+    cost_function_vel_controller.py   # costo di velocità
+    cost_function_pos_controller.py   # costo di posizione
+    train_APG_vel_controller.py       # training della velocità (50 Hz), rampa del peso delle azioni
+    train_APG_pos_controller.py       # training della posizione sopra la velocità congelata (--vel_run)
   eval/
-    eval_pos_controller_policy.py     # valutazione con GUI: la rete guida il drone, 5 riferimenti, poi chiude e salva i grafici
-    plots_pos_controller.py           # grafici e riepilogo della posizione (posizione, yaw, velocità, spinta, momenti)
-    eval_vel_controller_policy.py     # valutazione con GUI della velocità: 3 riferimenti, frecce verde (comando) e blu (reale), poi chiude e salva i grafici
-    plots_vel_controller.py           # grafici e riepilogo della velocità (riferimento contro reale, errore a regime, spinta, momenti)
+    eval_vel_controller_policy.py     # GUI velocità: 3 riferimenti, frecce comando/reale, poi chiude e salva i grafici
+    plots_vel_controller.py           # grafici e riepilogo velocità
+    eval_pos_controller_policy.py     # GUI posizione: 5 riferimenti, sfere, frecce di yaw, poi chiude e salva i grafici
+    plots_pos_controller.py           # 3 figure: posizione/yaw, velocità, spinta e momenti
   tests/                              # test_pos_env, test_vel_env, test_cascade, test_cost_function, test_vel_cost, test_decimation, test_train_world, grad_check, ...
 data/                                 # una cartella per controllore, ciascuna con policy/ e results/
-  pos_controller/
-    policy/<run>/{best,last}.pt       # checkpoint della policy
-    results/<run>/                    # log tensorboard + grafici di valutazione (eval_best.png, eval_best_summary.txt)
-  vel_controller/                     # stessa struttura, per il controllore di velocità
+  vel_controller/{policy,results}/<run>/
+  pos_controller/{policy,results}/<run>/
+    policy/<run>/{best,last}.pt       # checkpoint (quello di posizione contiene anche la rete di velocità)
+    results/<run>/                    # log tensorboard + grafici e riepilogo di valutazione
 ```
 
 ## 4. Come funziona
@@ -99,147 +103,138 @@ data/                                 # una cartella per controllore, ciascuna c
 | 5 epoche sugli stessi dati | un aggiornamento per finestra |
 | sconto γ per i premi lontani | finestra di 32 passi di controllo (BPTT troncata) |
 
-Il gradiente è il prodotto delle derivate della fisica su tutti i passi: è il motivo per cui la fisica deve essere stabile (vedi 6).
+Dove sta Warp: `apply_wrench` è l'unico kernel scritto da noi; i kernel del solver li fornisce Newton. Un `wp.Tape` registra i lanci di un passo
+di mondo; `tape.backward()` esegue al contrario i kernel aggiunti (generati in automatico) e `_SimStep` (`torch.autograd.Function`) collega questo
+al backward di PyTorch.
 
-### 4.2 Un passo di controllo (cascata)
+### 4.2 Frequenze
+
+- Fisica **100 Hz** (`dt = 0.01`). Il mondo ha `decimation = 2`: passo di 0.02 s = **50 Hz**, quello della rete di velocità.
+- La rete di posizione agisce ogni 2 passi del mondo: **25 Hz** (0.04 s). Nel training di posizione `--horizon` conta passi di posizione (il mondo ne ha il doppio).
+- Solver: `SolverSemiImplicit` senza contatti. Smorzamento angolare 0.05 (default di Newton). La rotazione libera diverge sopra circa 60 rad/s.
+
+### 4.3 Controllore di velocità (anello interno)
+
+- **Osservazioni (17):** velocità lineare nel corpo (3), velocità angolare nel corpo (3), gravità proiettata (3), azione precedente (4), riferimento (vx, vy, vz, wz) (4).
+  Normalizzate con media e varianza mobili (statistiche che ignorano righe non finite).
+- **Azioni (4):** spinta e 3 momenti in [−1, 1]. Spinta = `1.8 · peso · (a0+1)/2` lungo z del corpo (0 … 1.536 N, hover a 0.853 N con a0 = 0.111);
+  momenti = `(0.021, 0.021, 0.0085) · a[1:4]`. Stesse formule di Isaac Lab.
+- **Riferimenti:** `RefHandler`, 5 modalità (probabilità 0.35 / 0.15 / 0.15 / 0.30 / 0.05), campo ±1 m/s lineare, ±1.5 rad/s su wz, permanenza 1.0-2.5 s,
+  più riferimenti per episodio, nessun curriculum. Episodio da 10 s.
+- **Reset:** inclinazione > 65°, timeout, stato non finito, drone oltre 20 m, |ω| > 30 rad/s.
+- **Costo** (`cost_function_vel_controller.py`): errore di velocità lineare (peso 3.0) e angolare (1.0), variazione delle azioni con peso in rampa
+  (0.01 → 0.1 nei default, su `--iterations` iterazioni), ω_xy (0.015), assetto (0.05) e tilt oltre 25° (5.0). `best.pt` si sceglie con il costo "monitor"
+  calcolato col peso finale delle azioni. I pesi si cambiano con `--cost nome=valore`.
+- **Run scelto: `apg_vel_v7`** (3000 iterazioni, `best` = `last`, pulito). Lo hanno addestrato pesi delle azioni più alti (0.5 → 0.9) e ω_xy 0.03:
+  controllare i valori salvati nel checkpoint prima di rifarlo.
+
+### 4.4 Controllore di posizione (cascata)
 
 ```
-rete di POSIZIONE (PyTorch, 25 Hz) -> 4 riferimenti di velocità normalizzati in [-1,1] -> x scala (1,1,1,1.5): m/s e rad/s, nel corpo
+rete di POSIZIONE (PyTorch, 25 Hz) -> 4 riferimenti normalizzati in [-1,1] -> x scala (1,1,1,1.5): m/s e rad/s, nel corpo
   x2 volte (50 Hz): rete di VELOCITÀ (congelata) legge velocità, gravità, azione precedente e riferimento -> spinta e momenti (N,4)
       x2 passi di fisica a 100 Hz con la stessa azione (zero-order hold), registrati in un wp.Tape:
-          clear_forces  ->  apply_wrench [nostro kernel]  ->  solver.step (SolverSemiImplicit, senza contatti)
+          clear_forces  ->  apply_wrench [nostro kernel]  ->  solver.step
 stato (N,7) e (N,6) visto da PyTorch senza copia (wp.to_torch)
 env + costo (PyTorch) -> loss;  backward: tape.backward() ripercorre i kernel al contrario, e il gradiente attraversa
   la rete di velocità congelata (parametri senza gradiente, ma ingressi sì) fino alla rete di posizione
 ```
 
-- **Frequenze come in Isaac Lab:** fisica 100 Hz (`dt = 0.01`); il mondo ha `decimation = 2` (passo di 0.02 s = 50 Hz, quello della rete di velocità);
-  la rete di posizione agisce ogni 2 passi del mondo: **25 Hz** (0.04 s). `--horizon` conta passi di posizione (il mondo ne ha il doppio).
-- **Rete di velocità congelata:** si carica con `--vel_run` (es. `apg_vel_v7`) dentro `PosControllerMLP` (`vel_policy`): in `eval()` sempre, statistiche
-  di normalizzazione fisse. Il checkpoint della posizione la contiene, quindi la valutazione carica un solo file.
-- **Azioni della posizione = riferimenti di velocità** (vx, vy, vz, wz) normalizzati; l'azione precedente nelle osservazioni (4) sono i riferimenti del
-  passo prima, non più spinta e momenti. Uscita iniziale ~0: il drone parte in hover. Il termine `effort` del costo ora penalizza |riferimento|² (hover = 0).
-- **Drone (rete di velocità → fisica):** un solo corpo rigido. Spinta = `1.8 · peso · (a0+1)/2` lungo z del corpo (0 ... 1.536 N, hover a 0.853 N con a0 = 0.111);
-  momenti = `(0.021, 0.021, 0.0085) · a[1:4]`; azioni limitate in [−1, 1]. Stesse formule di Isaac Lab (verificato).
+- **Rete di velocità congelata:** si carica con `--vel_run` (es. `apg_vel_v7`) dentro `PosControllerMLP`: sempre in `eval()`, nessun gradiente sui parametri, statistiche fisse.
+  Il checkpoint della posizione la contiene: la valutazione carica un solo file. I vecchi checkpoint di posizione (uscita = spinta e momenti) non sono compatibili.
+- **Azioni della posizione = riferimenti di velocità**; l'azione precedente nelle osservazioni (4) è il riferimento del passo prima. Uscita iniziale ~0: il drone parte in hover.
+  Il termine `effort` del costo penalizza |riferimento|².
 - **Osservazioni (18):** errore di posizione **nel sistema del corpo** (3), sin/cos errore di yaw (2), velocità lineare (3) e angolare (3) nel corpo,
-  gravità proiettata (3), azione precedente (4). Normalizzate con media e varianza mobili (come `RunningStandardScaler` di skrl).
-- **Riferimenti (come Isaac Lab):** coda di **3 waypoint** per episodio (x, y ∈ ±1.5 m, z ∈ 0.5-1.5 m, yaw ∈ ±π). Si avanza quando il drone sta entro
-  **0.15 m e 0.2 rad per 1.2 s**; dopo l'ultimo il riferimento resta. Episodio da **15 s**. Reset anche per inclinazione > 65°, stato non finito o drone oltre 20 m.
-- **Training:** `--horizon 32` passi di controllo (1.28 s, 128 passi di fisica) per finestra, 4096 mondi, Adam, lr 1e-3, clip del gradiente a 1.0,
-  gli aggiornamenti con gradiente non finito vengono saltati. Circa **170 ms per iterazione, 3000 iterazioni ≈ 8-9 minuti**.
-
-### 4.3 Costo (pesi di default attuali, in `train/cost_function_pos_controller.py`)
-
-Somma di termini per passo (più basso = meglio), tutti derivabili:
+  gravità proiettata (3), azione precedente (4).
+- **Riferimenti (come Isaac Lab):** coda di **3 waypoint** per episodio (x, y ∈ ±1.5 m, z ∈ 0.5-1.5 m, yaw ∈ ±π). Si avanza entro **0.15 m e 0.2 rad per 1.2 s**.
+  Episodio da **15 s**. Reset anche per inclinazione > 65°, stato non finito o drone oltre 20 m.
+- **Training:** `--horizon 32` passi di posizione per finestra, 4096 mondi, Adam, lr 1e-3, `--grad_clip 1.0`; gli aggiornamenti con gradiente non finito sono saltati.
+- **Costo** (`cost_function_pos_controller.py`):
 
 | Termine | Peso | Cosa fa |
 |---|---|---|
 | posizione, ampio raggio | 1.0 · (1 − e^(−0.5 d)) | avvicinarsi |
 | posizione, precisione | 1.4 · (1 − e^(−8 d)) | arrivare sul bersaglio |
 | yaw | 0.32 · \|err\| e 0.32 · (1 − e^(−7 \|err\|)) | allinearsi |
-| velocità lineare | **0.1** · v² (+ 0.5 · v² entro 0.5 m: frenata) | limita la velocità |
-| velocità angolare | **0.01** · (ωx² + ωy²); 0.002 su z | smorza rotazioni |
-| assetto | **0.5** · (1 − cos tilt); 10 · eccesso² oltre **25°** | limita l'inclinazione |
-| azioni | 0.1 · Δazione²; 0.01 · (azione − hover)² | comandi lisci |
+| velocità lineare | 0.1 · v² (+ 0.5 · v² entro 0.5 m: frenata) | limita la velocità |
+| velocità angolare | 0.01 · (ωx² + ωy²); 0.002 su z | smorza rotazioni |
+| assetto | 0.5 · (1 − cos tilt); 10 · eccesso² oltre 25° | limita l'inclinazione |
+| azioni | 0.1 · Δazione²; 0.01 · \|riferimento\|² | comandi lisci |
 
-I pesi di posizione e yaw sono quelli di Isaac Lab divisi per 25; gli altri sono stime tarate a mano. I valori in grassetto sono quelli cambiati
-nell'ultima iterazione. Si possono cambiare da riga di comando con `--cost nome=valore` (ripetibile).
+I pesi di posizione e yaw sono quelli di Isaac Lab divisi per 25; gli altri sono stime tarate a mano. Si cambiano con `--cost nome=valore`.
+I pesi per la cascata non sono ancora stati ritarati: sono quelli del controllore che comandava direttamente spinta e momenti.
 
 ## 5. Comandi
 
 ```bash
-# training del controllore di posizione (circa 8-9 minuti; lo lancia l'utente; salva in data/pos_controller/).
-# Il run_name deve essere nuovo a ogni prova:
-docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train/train_APG_pos_controller.py \
-  --vel_run apg_vel_v7 --num_envs 4096 --horizon 32 --iterations 3000 --lr 1e-3 --grad_clip 1.0 \
-  --log_interval 50 --ckpt_interval 200 --run_name <nome>
-
-# training del controllore di velocità (50 Hz, rampa del peso delle azioni; salva in data/vel_controller/):
+# training del controllore di velocità (50 Hz; salva in data/vel_controller/; il run_name deve essere nuovo)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train/train_APG_vel_controller.py \
   --num_envs 4096 --horizon 32 --iterations 3000 --lr 1e-3 --grad_clip 1.0 \
   --log_interval 50 --ckpt_interval 200 --run_name <nome>
 
-# valutazione con GUI (chiude da sola dopo 5 riferimenti e salva grafici e riepilogo in data/pos_controller/results/<nome>/)
-docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> [--ckpt last] [--num_drones 1]
+# training del controllore di posizione sopra la rete di velocità congelata (salva in data/pos_controller/)
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train/train_APG_pos_controller.py \
+  --vel_run apg_vel_v7 [--vel_ckpt best|last] --num_envs 4096 --horizon 32 --iterations 3000 --lr 1e-3 --grad_clip 1.0 \
+  --log_interval 50 --ckpt_interval 200 --run_name <nome>
 
-# idem, con riferimento di posizione scelto a mano (x, y, z in metri e yaw in GRADI, nel mondo; fisso per tutta la prova;
-# gli assi non indicati restano quelli di partenza; durata --duration, default 10 s)
-docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --x 1.0 --y -0.5 [--z 1.2] [--yaw 90] [--duration 10]
-
-# valutazione con GUI del controllore di velocità (3 riferimenti, poi chiude; salva in data/vel_controller/results/<nome>/)
-docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> [--ckpt last] [--n_refs 3]
-
-# idem, con riferimento di velocità scelto a mano (fisso per tutta la prova; gli assi non indicati valgono 0; durata --duration, default 10 s)
+# valutazione della velocità con GUI (3 riferimenti casuali, poi chiude; salva in data/vel_controller/results/<nome>/)
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> [--ckpt last] [--n_refs 3] [--seed N]
+# idem, riferimento fisso scelto a mano (assi non indicati = 0; --duration, default 10 s)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> --vx 0.5 --vy -0.3 [--vz 0.2] [--wz 1.0] [--duration 10]
 
-# test (secondi)
-docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_pos_env.py
-docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_cost_function.py
-docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_decimation.py
-docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_cascade.py
-docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_vel_env.py
-docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/test_vel_cost.py
+# valutazione della posizione con GUI (5 riferimenti casuali, poi chiude; salva 3 grafici e il riepilogo in data/pos_controller/results/<nome>/)
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> [--ckpt last] [--n_waypoints 5] [--seed N]
+# idem, bersaglio fisso (x, y, z in metri e yaw in GRADI; assi non indicati = quelli di partenza; --duration, default 10 s)
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --x 1.0 --y -0.5 [--z 1.2] [--yaw 90] [--duration 10]
 
-# curve di training (una cartella per controllore)
-tensorboard --logdir /workspace/project_workspace/data/pos_controller/results
+# test (secondi)
+for t in test_pos_env test_cost_function test_decimation test_cascade test_vel_env test_vel_cost; do
+  docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/$t.py; done
+
+# curve di training
 tensorboard --logdir /workspace/project_workspace/data/vel_controller/results
+tensorboard --logdir /workspace/project_workspace/data/pos_controller/results
 ```
 
-Nel log di training: `dist` (distanza media dal riferimento, un drone fermo vale circa 1.4 m), `wp` (indice medio del riferimento, 0-2),
-`|grad|`, `saltate` (aggiornamenti scartati). I file creati dal container sono di root: lanciare `chown_me.sh` prima di modificarli dall'host.
+Nel log di training: `|grad|`, `saltate` (aggiornamenti scartati) e, per la velocità, `vel_err_lin/wz`, `tilt`, `ang_vel_max`, `nonfinite_frac`; per la posizione
+`dist` (distanza media dal riferimento, un drone fermo vale circa 1.4 m) e `wp` (indice medio del riferimento, 0-2).
+I file creati dal container sono di root: lanciare `chown_me.sh` prima di modificarli dall'host.
+Se manca il container: `docker run --rm --gpus all` con i volumi di `run.sh`.
 
-## 6. Risultati e cose imparate
+## 6. Cose imparate
 
-Run in `data/pos_controller/policy/` (tutti con 4096 mondi, orizzonte 32, 3000 iterazioni, 25 Hz, 3 riferimenti, tranne il primo):
-
-| Run | Pesi diversi dal default attuale | Esito |
-|---|---|---|
-| `apg_obsfix_h32` | schema vecchio (100 Hz, riferimenti a tempo) | **obsoleto**, non confrontabile |
-| `apg_25hz_3wp` | `action_rate` 0.1, `lin_vel` 0.01, `upright` 0.1, `ang_vel_xy` 0.002, tilt libero 35° | **divergenza a NaN** poco dopo l'it. 2000; `best.pt` (it. 2000) è buono: dist 0.19 m, **fermo a riposo**; velocità fino a 2.5 m/s, inclinazione 34° |
-| `apg_25hz_3wp_ar05` | `action_rate` 0.5 | più preciso (dist 0.13 m) ma **tremolio a riposo**: ciclo limite a 5 Hz sui comandi (±20% di spinta, quota ±2.5 mm) |
-| `apg_25hz_3wp_tilt25` | tilt 25°, `upright` 0.5, `ang_vel_xy` 0.01 | meno tremolio, ma **troppo veloce**: fino a 3.2 m/s |
-| `apg_25hz_3wp_tilt25_v01` | **= pesi di default attuali** (anche `lin_vel` 0.1) | scelto come il migliore: velocità 1.2-1.9 m/s, inclinazione 15-24°; più lento (dist media di training 0.51 m, tempo a 15 cm 1.0-2.2 s sui salti provati) |
-
-Cose da sapere:
-
-- **Instabilità della rotazione:** con momenti nulli, a velocità angolare alta l'integrazione non conserva l'energia e diverge a NaN
-  (misurato: da 60-120 rad/s in pochi secondi, anche da 20 rad/s attorno a z). In training un solo drone in questo stato rende NaN le statistiche di
-  normalizzazione e quindi tutta la rete (successo nel run senza protezioni). Il funzionamento normale sta a 7-8 rad/s.
-  Protezioni già presenti: il normalizzatore ignora osservazioni non finite; `done()` resetta stati non finiti o a più di 20 m.
-- **Sistema troppo ideale:** nessun rumore, disturbo, ritardo né dinamica dei motori (anche in Isaac Lab i motori sono ideali: forza applicata al corpo).
-  Un controllore che non oscilla mai non dice nulla sulla robustezza.
-- **Limiti di attuazione:** a regime la rete sta sull'hover; nei transitori usa quasi tutto il campo di spinta (0.04-1.5 N) e il momento z
-  tocca il massimo (±0.0085 N·m) nel 2-3% dei passi. Da confrontare con i limiti reali del Tello.
-- **Comportamento alla partenza:** il costo premia l'arrivo rapido; senza limiti sulla velocità la rete si inclina molto quando cambia il riferimento
-  (74° a 3 m con i pesi vecchi). In Isaac Lab è la cascata (riferimenti di velocità limitati a ±1 m/s) a tenerlo basso.
-- Il confronto tra run **non è pulito** quando cambiano più pesi insieme; la loss non è confrontabile tra run con pesi diversi.
+- **Collasso del training (velocità v3):** con lr costante e picchi di gradiente (|grad| da 0.1 a 14000) la policy è crollata all'it. ~1900 (ω fino a 190 rad/s, 87% di reset, senza NaN).
+  Rimedi: `--grad_clip`, reset per |ω| > 30 rad/s, scelta di `best.pt` col costo monitor. Possibile ulteriore passo: lr decrescente.
+- **Instabilità della rotazione:** con momenti nulli a velocità angolare alta l'integrazione diverge a NaN (da 60-120 rad/s in pochi secondi). Un solo drone in questo stato
+  rendeva NaN le statistiche di normalizzazione e quindi tutta la rete: ora il normalizzatore ignora righe non finite e `done()` resetta stati non finiti.
+- **Pesi del costo:** cambiare più pesi insieme dà risultati non interpretabili (v4 peggiorò). Si cambia un peso alla volta; la loss non è confrontabile tra run con pesi diversi.
+  Il peso sulle azioni controlla l'aggressività e il tremolio (valori alti → più oscillazioni a riposo nel primo controllore diretto).
+- **Cascata:** il gradiente attraverso la rete di velocità congelata e la fisica coincide con le differenze finite (errore relativo 1e-4 - 2e-3, `test_cascade.py`).
+- **Decollo:** in simulazione (senza pavimento) il drone sale da z = 0 a 1 m in circa 1 s senza cedere. Nella realtà ci sono effetto suolo, contatto e limite di spinta
+  (1.5 su 1.536 N) e il Tello vero accetta comandi di velocità (`rc`): non è un test di decollo reale.
+- **Sistema troppo ideale:** nessun rumore, disturbo, resistenza dell'aria, ritardo né dinamica dei motori (anche in Isaac Lab, versione djitello, la forza è applicata al corpo;
+  la versione più recente ha una resistenza dell'aria F = 8e-3·|v_rel|·v_rel e vento). Il drone non oscilla perché non c'è nulla che lo disturbi.
+- **Un solo kernel Warp scritto da noi**, `apply_wrench`; il resto è Newton.
 
 ## 7. Cosa vogliamo fare
 
-Prossimi passi, in ordine:
+Prossimi passi, in ordine indicativo:
 
-1. **Misurare il tremolio a riposo** del run migliore (`tilt25_v01`) con la stessa prova usata per `ar05` (variazione delle azioni, ciclo limite):
-   finora di questo run sono stati misurati solo velocità, inclinazione e tempo di arrivo.
-2. **Robustezza numerica:** reset dei droni con velocità angolare eccessiva (es. > 30 rad/s) prima della divergenza e contatore dei mondi non finiti nel log
-   (proposto, non ancora fatto); learning rate decrescente a fine training.
-3. **Realismo, uno alla volta** (non ora): rumore sulle osservazioni, disturbi (vento/forze casuali), variazione di massa e spinta, dinamica dei motori
-   (filtro del primo ordine), eventuale ritardo. Il rumore va aggiunto anche in valutazione per un confronto onesto.
-4. **Controllore di velocità e cascata** (come Isaac Lab):
-   - rete di velocità (anello interno, 50 Hz) addestrata con APG: osservazioni 17 (velocità, gravità, azione precedente, riferimento di velocità),
-     riferimenti campionati in ±1 m/s (lineari) e ±1.5 rad/s (yaw), con modalità miste e curriculum, costo sull'errore di velocità normalizzato
-     + azioni lisce (peso crescente) + tilt;
-   - poi congelata; la rete di posizione produce 4 numeri (`tanh`) × scala = riferimenti di velocità, e la catena rete di posizione → rete di velocità → spinta e momenti
-     resta differenziabile (gradiente attraverso la rete di velocità: da tenere d'occhio la stabilità).
-5. **Multi-drone:** più droni nello stesso mondo (collision group, separazione, formazione), osservazioni dei vicini.
-6. **Confronto con Isaac Lab:** tempi di training (qui circa 8-9 minuti per 3000 iterazioni a 4096 mondi) e qualità dei risultati.
-7. **Manutenzione:** volume per la cache dei kernel Warp e porta 6006 per tensorboard in `run.sh`; i container girano come root (file di root in `newton_ws`);
-   aggiornare la copia su GitHub (`Newton_Project`; non so se il push è aggiornato: la cartella non è un repo git).
+1. **Valutare e ritarare il controllore di posizione in cascata** (`apg_pos_cascade_v3` è l'ultimo): confrontare precisione, tempi di arrivo e aggressività con il vecchio controllo diretto.
+2. **Realismo, uno alla volta:** resistenza dell'aria lineare e quadratica in `apply_wrench`, disturbi (vento/forze casuali), ritardo e filtro del primo ordine sui motori,
+   rumore sulle osservazioni (anche in valutazione), variazione di massa e spinta. Si parte da resistenza + un disturbo.
+3. **Multi-drone:** una sola rete con pesi condivisi usata in modo decentralizzato da ogni drone (funziona anche con un drone solo), osservazioni dei vicini a slot
+   con flag di presenza e numero variabile, costo di squadra con termine liscio di separazione. Con APG non servono IPPO/MAPPO né critic. Opzione: staccare dal grafo gli stati dei vicini.
+4. **Confronto con Isaac Lab:** tempi di training e qualità dei risultati a parità di cascata e di frequenze.
+5. **Manutenzione:** volume per la cache dei kernel Warp e porta 6006 per tensorboard in `run.sh`; i container girano come root; sistemare su GitHub:
+   rimuovere `data/pos_controller/policy/apg_25hz_3wp/last.pt` (corrotto) e aggiornare il percorso in `.gitignore`.
 
 ## 8. Note di lavoro
 
-- I training lunghi li lancia l'utente: il comando si prepara e si spiega cosa guardare nel log.
+- I training lunghi li lancia l'utente: si prepara il comando e si spiega cosa guardare nel log.
 - Il progetto Isaac Lab di riferimento è in `/home/piero/Scrivania/Project_Favuzzi/...` (`tasks/direct/pos_controller` e `vel_controller`);
   copia su GitHub: *Position-and-Velocity-Controller-Isaaclab-Djitello*.
+- Repository di questo progetto: https://github.com/pieromutasci-a11y/Newton_Project (ramo `main`).
 - Documentazione di Newton: https://newton-physics.github.io/newton/latest/ (esempio di riferimento `newton/examples/diffsim/example_diffsim_drone.py`).
 - Lavori su APG e simulazione differenziabile citati a memoria (da verificare prima di una bibliografia): Wiedemann et al. *Training Efficient Controllers via Analytic Policy Gradient* (ICRA 2023);
   Mora et al. *PODS* (ICML 2021); Xu et al. *SHAC* (ICLR 2022).
