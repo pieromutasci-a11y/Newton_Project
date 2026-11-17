@@ -204,7 +204,7 @@ docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> --vx 0.5 --vy -0.3 [--vz 0.2] [--wz 1.0] [--duration 10]
 
 # valutazione con traiettoria continua (tipo: line, circle, ellipse, eight, helix; --speed = picco di velocità in m/s; --duration default 20 s)
-docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4 [--orient mix|flat|3d]
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4 [--orient flat|3d]   # tipo anche `random`; dimensioni casuali; flat = piano xy (default), 3d = orientamento casuale
 
 # valutazione della posizione con GUI (5 riferimenti casuali, poi chiude; salva 3 grafici e il riepilogo in data/pos_controller/results/<nome>/)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> [--ckpt last] [--n_waypoints 5] [--seed N]

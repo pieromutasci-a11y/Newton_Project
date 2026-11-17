@@ -277,7 +277,7 @@ class TargetHandler:
         """Tutti i mondi seguono una traiettoria del tipo `kind` (nome di KIND_NAMES o intero), con picco di velocità
         `speed` [m/s] (default: casuale in traj_speed_range) e frazione di curve orizzontali `flat_prob` (default: traj_flat_prob).
         Valutazione con traiettoria scelta a mano."""
-        kind = KIND_NAMES[kind] if isinstance(kind, str) else int(kind)
+        kind = None if kind == "random" else (KIND_NAMES[kind] if isinstance(kind, str) else int(kind))  # None: tipo casuale per mondo
         ids = torch.arange(self.n, device=self.device)
         params = self._sample_traj(self.n, kind=kind, speed_range=None if speed is None else (speed, speed), flat_prob=flat_prob)
         self._set_traj(ids, torch.ones(self.n, dtype=torch.bool, device=self.device), params)

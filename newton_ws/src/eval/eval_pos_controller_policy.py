@@ -13,9 +13,18 @@ tutta la prova; gli assi non indicati restano quelli di partenza del drone (yaw 
     python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --x 1.0 --y -0.5 --z 1.2
     python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --z 1.5 --yaw 90 --duration 15
 
-Traiettoria continua: con --traj {line,circle,ellipse,eight,helix} (e --speed, picco di velocità in m/s, default 0.3)
-il riferimento percorre una curva casuale di quel tipo per --duration secondi (default 20); la curva è disegnata in verde:
+Traiettoria continua: con --traj {line,circle,ellipse,eight,helix,random} il riferimento percorre una curva di quel tipo
+(random = tipo casuale) con dimensioni, posizione e fase CASUALI per --duration secondi (default 20); la curva è disegnata
+in verde. --orient flat (default) la tiene sul piano orizzontale xy (ruotata solo attorno a z), --orient 3d le dà un
+orientamento casuale nello spazio; --speed è il picco di velocità in m/s (default 0.3):
     python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4
+    python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj ellipse --orient 3d
+    python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj random --orient 3d --seed 5
+
+Riassunto dei tre modi (si sceglie con le opzioni, non si possono combinare):
+    nessuna opzione        5 waypoint casuali (--n_waypoints)
+    --x/--y/--z/--yaw      un riferimento fisso scelto a mano
+    --traj ...             traiettoria continua
 
 Senza display: --viewer null (stampa solo le metriche).
 """
@@ -107,7 +116,7 @@ class Example:
                 f"z {float(target[d0, 2]):+.2f} m,  yaw {math.degrees(float(yaw[d0])):+.0f}°  (partenza x {float(start[d0, 0]):+.2f}  y {float(start[d0, 1]):+.2f}  z {float(start[d0, 2]):+.2f})"
             )
         if self.traj:
-            targets.set_trajectory(args.traj, args.speed, {'flat': 1.0, '3d': 0.0}.get(args.orient))
+            targets.set_trajectory(args.traj, args.speed, {'flat': 1.0, '3d': 0.0}[args.orient])
             # Il drone parte fermo vicino al punto iniziale della curva (entro 0.3 m), come nel training
             near = targets.target_pos + (torch.rand(args.num_drones, 3, device=dev) * 2.0 - 1.0) * 0.3
             near[:, 2] = near[:, 2].clamp(min=0.3)
@@ -251,8 +260,8 @@ if __name__ == "__main__":
     parser.add_argument("--z", type=float, default=None, help="riferimento fisso di z [m]")
     parser.add_argument("--yaw", type=float, default=None, help="riferimento fisso di yaw [GRADI]")
     parser.add_argument("--duration", type=float, default=None, help="durata della prova con riferimento fisso (default 10 s) o traiettoria (default 20 s) [s]")
-    parser.add_argument("--traj", choices=["line", "circle", "ellipse", "eight", "helix"], default=None, help="traiettoria continua invece dei waypoint")
-    parser.add_argument("--orient", choices=["mix", "flat", "3d"], default="mix", help="orientamento della traiettoria: mix (30%% orizzontali), flat (orizzontale), 3d (piano casuale)")
+    parser.add_argument("--traj", choices=["line", "circle", "ellipse", "eight", "helix", "random"], default=None, help="traiettoria continua invece dei waypoint (random = tipo casuale); dimensioni sempre casuali")
+    parser.add_argument("--orient", choices=["flat", "3d"], default="flat", help="orientamento della traiettoria (con --traj): flat = sul piano orizzontale xy, 3d = orientamento casuale nello spazio")
     parser.add_argument("--speed", type=float, default=0.3, help="picco di velocità della traiettoria [m/s] (con --traj)")
     parser.add_argument("--n_waypoints", type=int, default=5, help="riferimenti da raggiungere prima di chiudere")
     parser.add_argument("--max_s", type=float, default=120.0, help="tempo massimo di simulazione [s], per non restare bloccati")
