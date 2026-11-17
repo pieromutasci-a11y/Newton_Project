@@ -175,7 +175,7 @@ Come in Isaac Lab (`wp_preview_horizon`), la rete vede una **finestra** sul rife
 - **Waypoint fermi:** i punti futuri coincidono con quello attuale, quindi la finestra è nulla (incrementi 0, sin 0, cos 1) e il comportamento è quello di prima
   (nessuna anteprima: evita il ciclo limite attorno al bersaglio visto in Isaac Lab quando si anticipa il waypoint successivo).
 - **Traiettorie:** curve nel tempo (`TargetHandler`), valutate a t, t+0.5, t+1.0, t+1.5 s. Tipi: retta, cerchio, ellisse, otto, elica (cerchio con oscillazione lenta lungo la normale).
-  **Orientamento 3D uniforme** (rotazione casuale: piani orizzontali, verticali o inclinati; escursione verticale mediana 0.77 m, quasi nessuna curva orizzontale).
+  **Orientamento:** 30% di curve orizzontali (`--traj_flat_prob`, rotazione solo attorno a z), 70% con orientamento 3D uniforme (piani verticali o inclinati).
   Picco di velocità in 0.1-0.5 m/s (`--traj_speed_min/max`), dentro il campo dei waypoint (x, y ±1.5 m, z 0.5-1.5 m: se l'orientamento non ci sta, si riducono le ampiezze).
   Yaw: fisso, nel verso di marcia (solo per curve con piano quasi orizzontale, entro 25° dalla verticale; non per la retta) o in rotazione lenta (0.1-0.4 rad/s). Il riferimento scorre da solo: nessun avanzamento per raggiungimento, episodio da 15 s;
   il drone parte fermo entro 0.3 m dal punto iniziale.
@@ -204,7 +204,7 @@ docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> --vx 0.5 --vy -0.3 [--vz 0.2] [--wz 1.0] [--duration 10]
 
 # valutazione con traiettoria continua (tipo: line, circle, ellipse, eight, helix; --speed = picco di velocità in m/s; --duration default 20 s)
-docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4 [--orient mix|flat|3d]
 
 # valutazione della posizione con GUI (5 riferimenti casuali, poi chiude; salva 3 grafici e il riepilogo in data/pos_controller/results/<nome>/)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> [--ckpt last] [--n_waypoints 5] [--seed N]

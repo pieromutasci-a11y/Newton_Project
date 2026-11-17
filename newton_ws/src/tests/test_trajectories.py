@@ -73,6 +73,8 @@ print(f"  escursione verticale: mediana {float(zext.median()):.2f} m, massima {f
 print(f"  curve con escursione verticale > 0.2 m: {100 * float((zext > 0.2).float().mean()):.0f}%  | quasi orizzontali (< 0.05 m): {100 * float((zext < 0.05).float().mean()):.0f}%", ok(float((zext > 0.2).float().mean()) > 0.5, "3D"))
 print("  tutte dentro i limiti (x, y ±1.5, z 0.5-1.5)", ok(bool((pos[..., :2].abs() <= 1.5 + 1e-4).all() and (pos[..., 2] >= 0.5 - 1e-4).all() and (pos[..., 2] <= 1.5 + 1e-4).all()), "limiti 3D"))
 rot = th.tr["rot"]
+flat = rot[:, 2, 2].abs() > 1 - 1e-6
+print(f"  frazione di curve orizzontali (rot solo attorno a z): {float(flat.float().mean()):.2f} (atteso ~0.3)", ok(abs(float(flat.float().mean()) - 0.3) < 0.04, "flat"))
 print("  matrici di rotazione ortonormali", ok(bool((rot @ rot.transpose(1, 2) - torch.eye(3, device=dev)).abs().max() < 1e-4), "rotazioni"))
 print("  yaw nel verso di marcia continuo (nessun salto > 0.5 rad per passo di 0.1 s)", end=" ")
 yaws = torch.stack([th._curve(torch.full((2048,), float(t), device=dev))[2] for t in ts])

@@ -41,6 +41,7 @@ class TargetHandler:
         z_range: tuple[float, float] = (0.5, 1.5),  # m
         traj_prob: float = 0.0,  # probabilità che un episodio sia una traiettoria (0: solo waypoint, come prima)
         traj_speed_range: tuple[float, float] = (0.1, 0.5),  # m/s, picco della velocità della curva
+        traj_flat_prob: float = 0.3,  # frazione di curve sul piano orizzontale (solo ruotate attorno a z); le altre hanno orientamento 3D
         dt: float = 0.04,  # s, passo di controllo della rete di posizione (avanza il tempo delle traiettorie)
         window_points: int = 4,  # punti della finestra: l'attuale + (window_points - 1) futuri
         window_dt: float = 0.5,  # s tra due punti consecutivi della finestra
@@ -53,6 +54,7 @@ class TargetHandler:
         self.z_range = z_range
         self.traj_prob = traj_prob
         self.traj_speed_range = traj_speed_range
+        self.traj_flat_prob = traj_flat_prob
         self.dt = dt
         self.window_points = window_points
         self.window_dt = window_dt
@@ -105,7 +107,7 @@ class TargetHandler:
         return low + (high - low) * torch.rand(shape, device=self.device, generator=self._gen)
 
     # ------------------------------------------------------------------ curve
-    def _sample_traj(self, k: int, kind=None, speed_range=None) -> dict:
+    def _sample_traj(self, k: int, kind=None, speed_range=None, flat_prob=None) -> dict:
         """Parametri di `k` traiettorie. Curva nel sistema locale, poi ruotata da una rotazione 3D casuale R e traslata
         nel centro c (il piano della curva può avere qualunque orientamento nello spazio):
 
@@ -141,6 +143,13 @@ class TargetHandler:
             ],
             dim=-1,
         ).reshape(k, 3, 3)
+        # Una frazione `flat_prob` di curve sta sul piano orizzontale: rotazione solo attorno a z
+        psi = u(0.0, two_pi, (k,))
+        cp, sp = torch.cos(psi), torch.sin(psi)
+        zero, one = torch.zeros_like(psi), torch.ones_like(psi)
+        rot_flat = torch.stack([cp, -sp, zero, sp, cp, zero, zero, zero, one], dim=-1).reshape(k, 3, 3)
+        flat_prob = self.traj_flat_prob if flat_prob is None else flat_prob
+        rot = torch.where((u(0.0, 1.0, (k,)) < flat_prob)[:, None, None], rot_flat, rot)
 
         # Estensione della curva lungo x, y, z del mondo: sta in una scatola di semi-lati sum_j |R_ij| a_j.
         # Se supera il campo (z: metà del campo; xy: bordo meno un margine) si riducono le ampiezze.
@@ -264,12 +273,13 @@ class TargetHandler:
         self._refresh()
         self.step_target_pos, self.step_target_yaw, self.step_target_vel = self.target_pos, self.target_yaw, self.target_vel
 
-    def set_trajectory(self, kind, speed: float | None = None) -> None:
+    def set_trajectory(self, kind, speed: float | None = None, flat_prob: float | None = None) -> None:
         """Tutti i mondi seguono una traiettoria del tipo `kind` (nome di KIND_NAMES o intero), con picco di velocità
-        `speed` [m/s] (default: casuale in traj_speed_range). Valutazione con traiettoria scelta a mano."""
+        `speed` [m/s] (default: casuale in traj_speed_range) e frazione di curve orizzontali `flat_prob` (default: traj_flat_prob).
+        Valutazione con traiettoria scelta a mano."""
         kind = KIND_NAMES[kind] if isinstance(kind, str) else int(kind)
         ids = torch.arange(self.n, device=self.device)
-        params = self._sample_traj(self.n, kind=kind, speed_range=None if speed is None else (speed, speed))
+        params = self._sample_traj(self.n, kind=kind, speed_range=None if speed is None else (speed, speed), flat_prob=flat_prob)
         self._set_traj(ids, torch.ones(self.n, dtype=torch.bool, device=self.device), params)
         self._refresh()
         self.step_target_pos, self.step_target_yaw, self.step_target_vel = self.target_pos, self.target_yaw, self.target_vel

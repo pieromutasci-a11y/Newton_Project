@@ -107,7 +107,7 @@ class Example:
                 f"z {float(target[d0, 2]):+.2f} m,  yaw {math.degrees(float(yaw[d0])):+.0f}°  (partenza x {float(start[d0, 0]):+.2f}  y {float(start[d0, 1]):+.2f}  z {float(start[d0, 2]):+.2f})"
             )
         if self.traj:
-            targets.set_trajectory(args.traj, args.speed)
+            targets.set_trajectory(args.traj, args.speed, {'flat': 1.0, '3d': 0.0}.get(args.orient))
             # Il drone parte fermo vicino al punto iniziale della curva (entro 0.3 m), come nel training
             near = targets.target_pos + (torch.rand(args.num_drones, 3, device=dev) * 2.0 - 1.0) * 0.3
             near[:, 2] = near[:, 2].clamp(min=0.3)
@@ -252,6 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--yaw", type=float, default=None, help="riferimento fisso di yaw [GRADI]")
     parser.add_argument("--duration", type=float, default=None, help="durata della prova con riferimento fisso (default 10 s) o traiettoria (default 20 s) [s]")
     parser.add_argument("--traj", choices=["line", "circle", "ellipse", "eight", "helix"], default=None, help="traiettoria continua invece dei waypoint")
+    parser.add_argument("--orient", choices=["mix", "flat", "3d"], default="mix", help="orientamento della traiettoria: mix (30%% orizzontali), flat (orizzontale), 3d (piano casuale)")
     parser.add_argument("--speed", type=float, default=0.3, help="picco di velocità della traiettoria [m/s] (con --traj)")
     parser.add_argument("--n_waypoints", type=int, default=5, help="riferimenti da raggiungere prima di chiudere")
     parser.add_argument("--max_s", type=float, default=120.0, help="tempo massimo di simulazione [s], per non restare bloccati")

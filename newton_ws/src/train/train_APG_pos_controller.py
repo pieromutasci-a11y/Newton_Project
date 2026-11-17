@@ -59,6 +59,7 @@ def parse_args():
     p.add_argument("--grad_clip", type=float, default=1.0, help="norma massima del gradiente")
     p.add_argument("--episode_s", type=float, default=15.0, help="durata massima di un episodio [s]")
     p.add_argument("--traj_prob", type=float, default=0.5, help="probabilità che un episodio sia una traiettoria continua (0: solo waypoint)")
+    p.add_argument("--traj_flat_prob", type=float, default=0.3, help="frazione di traiettorie sul piano orizzontale (le altre hanno orientamento 3D casuale)")
     p.add_argument("--traj_speed_min", type=float, default=0.1, help="picco di velocità delle traiettorie, minimo [m/s]")
     p.add_argument("--traj_speed_max", type=float, default=0.5, help="picco di velocità delle traiettorie, massimo [m/s]")
     p.add_argument(
@@ -109,7 +110,7 @@ def main():
     policy = PosControllerMLP(vel_ckpt=vel_path).to(dev)  # rete di posizione + rete di velocità congelata
     vel_meta = torch.load(vel_path, map_location="cpu")  # solo per registrare da dove arriva
     targets = TargetHandler(
-        args.num_envs, dev, seed=args.seed, dt=0.04, traj_prob=args.traj_prob, traj_speed_range=(args.traj_speed_min, args.traj_speed_max)
+        args.num_envs, dev, seed=args.seed, dt=0.04, traj_prob=args.traj_prob, traj_flat_prob=args.traj_flat_prob, traj_speed_range=(args.traj_speed_min, args.traj_speed_max)
     )
     env = PosControllerEnv(world, policy.vel_policy, targets, seed=args.seed, max_episode_s=args.episode_s)
     assert policy.input_dim == env.obs_dim and policy.output_dim == env.action_dim, (
