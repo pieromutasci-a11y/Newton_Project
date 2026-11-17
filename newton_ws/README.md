@@ -174,9 +174,10 @@ Come in Isaac Lab (`wp_preview_horizon`), la rete vede una **finestra** sul rife
 
 - **Waypoint fermi:** i punti futuri coincidono con quello attuale, quindi la finestra è nulla (incrementi 0, sin 0, cos 1) e il comportamento è quello di prima
   (nessuna anteprima: evita il ciclo limite attorno al bersaglio visto in Isaac Lab quando si anticipa il waypoint successivo).
-- **Traiettorie:** curve nel tempo (`TargetHandler`), valutate a t, t+0.5, t+1.0, t+1.5 s. Tipi: retta, cerchio, ellisse, otto, elica (cerchio con quota che oscilla).
-  Picco di velocità in 0.1-0.5 m/s (`--traj_speed_min/max`), dentro il campo dei waypoint (x, y ±1.5 m, z 0.5-1.5 m). Yaw: fisso, nel verso di marcia
-  (non per la retta) o in rotazione lenta (0.1-0.4 rad/s). Il riferimento scorre da solo: nessun avanzamento per raggiungimento, episodio da 15 s;
+- **Traiettorie:** curve nel tempo (`TargetHandler`), valutate a t, t+0.5, t+1.0, t+1.5 s. Tipi: retta, cerchio, ellisse, otto, elica (cerchio con oscillazione lenta lungo la normale).
+  **Orientamento 3D uniforme** (rotazione casuale: piani orizzontali, verticali o inclinati; escursione verticale mediana 0.77 m, quasi nessuna curva orizzontale).
+  Picco di velocità in 0.1-0.5 m/s (`--traj_speed_min/max`), dentro il campo dei waypoint (x, y ±1.5 m, z 0.5-1.5 m: se l'orientamento non ci sta, si riducono le ampiezze).
+  Yaw: fisso, nel verso di marcia (solo per curve con piano quasi orizzontale, entro 25° dalla verticale; non per la retta) o in rotazione lenta (0.1-0.4 rad/s). Il riferimento scorre da solo: nessun avanzamento per raggiungimento, episodio da 15 s;
   il drone parte fermo entro 0.3 m dal punto iniziale.
 - **Mix per episodio:** `--traj_prob` (default 0.5): ogni episodio, a ogni reset, è una traiettoria con questa probabilità, altrimenti una coda di 3 waypoint.
 - **Costo:** nel termine `lin_vel` e nella frenata si usa la velocità **relativa** a quella del riferimento (per i waypoint è 0, quindi identico a prima).

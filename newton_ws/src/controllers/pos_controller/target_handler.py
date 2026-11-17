@@ -76,7 +76,7 @@ class TargetHandler:
             "amp": z(num_worlds, 3),
             "omega": z(num_worlds, 3),
             "phase": z(num_worlds, 3),
-            "psi": z(num_worlds),  # rotazione della curva nel piano xy
+            "rot": torch.eye(3, device=device).repeat(num_worlds, 1, 1),  # orientamento 3D della curva (matrice di rotazione)
             "yaw_mode": torch.zeros(num_worlds, dtype=torch.long, device=device),  # 0 fisso, 1 nel verso di marcia, 2 ruota
             "yaw0": z(num_worlds),
             "yaw_rate": z(num_worlds),
@@ -106,12 +106,15 @@ class TargetHandler:
 
     # ------------------------------------------------------------------ curve
     def _sample_traj(self, k: int, kind=None, speed_range=None) -> dict:
-        """Parametri di `k` traiettorie. Posizione nel piano locale (poi ruotato di psi):
+        """Parametri di `k` traiettorie. Curva nel sistema locale, poi ruotata da una rotazione 3D casuale R e traslata
+        nel centro c (il piano della curva può avere qualunque orientamento nello spazio):
 
-            x' = ax sin(wx t + px),  y' = ay sin(wy t + py),  z = cz + az sin(wz t + pz)
+            l = (ax sin(wx t + px),  ay sin(wy t + py),  az sin(wz t + pz)),    p = c + R l
 
-        retta: ay = 0; cerchio: ax = ay, py = px + 90°; ellisse: ax != ay; otto: wy = 2 wx; elica: cerchio con z lenta.
-        Il picco della norma della velocità vale `speed` (campionata in speed_range); la curva sta dentro xy_range e z_range.
+        retta: ay = az = 0; cerchio: ax = ay, py = px + 90°; ellisse: ax != ay; otto: wy = 2 wx; elica: cerchio con
+        oscillazione lenta lungo l'asse locale z. Il picco della norma della velocità vale `speed` (campionata in
+        speed_range; la rotazione non cambia la norma); la curva sta dentro xy_range e z_range (le ampiezze si riducono
+        se, con quell'orientamento, la curva non ci starebbe).
         """
         u = self._uniform
         two_pi = 2.0 * math.pi
@@ -126,6 +129,27 @@ class TargetHandler:
         ay = torch.where(is_line, torch.zeros_like(r1), torch.where((kind == ELLIPSE) | is_eight, r2, r1))
         az = torch.where(is_helix, u(0.15, 0.4, (k,)), torch.zeros_like(r1))
         amp = torch.stack([ax, ay, az], dim=-1)
+
+        # Orientamento 3D uniforme (quaternione casuale normalizzato -> matrice di rotazione)
+        qr = torch.randn(k, 4, device=self.device, generator=self._gen)
+        qw, qx, qy, qz = (qr / qr.norm(dim=-1, keepdim=True)).unbind(-1)
+        rot = torch.stack(
+            [
+                1 - 2 * (qy**2 + qz**2), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw),
+                2 * (qx * qy + qz * qw), 1 - 2 * (qx**2 + qz**2), 2 * (qy * qz - qx * qw),
+                2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx**2 + qy**2),
+            ],
+            dim=-1,
+        ).reshape(k, 3, 3)
+
+        # Estensione della curva lungo x, y, z del mondo: sta in una scatola di semi-lati sum_j |R_ij| a_j.
+        # Se supera il campo (z: metà del campo; xy: bordo meno un margine) si riducono le ampiezze.
+        half_xy, half_z = self.xy_range[1] - 0.1, 0.5 * (self.z_range[1] - self.z_range[0])
+        ext = (rot.abs() * amp[:, None, :]).sum(dim=-1)  # (k, 3)
+        shrink = torch.minimum(torch.ones_like(r1), torch.minimum(half_z / ext[:, 2].clamp(min=1e-6), half_xy / ext[:, :2].amax(dim=-1).clamp(min=1e-6)))
+        amp = amp * shrink[:, None]
+        ax, ay, az = amp.unbind(-1)
+        ext = ext * shrink[:, None]
 
         ratio = torch.stack(  # rapporto tra le frequenze degli assi (x : y : z)
             [torch.ones_like(r1), torch.where(is_eight, 2.0 * torch.ones_like(r1), torch.ones_like(r1)), torch.where(is_helix, 0.25 * torch.ones_like(r1), torch.zeros_like(r1))],
@@ -144,17 +168,16 @@ class TargetHandler:
         py = torch.where(is_eight, 2.0 * px, px + math.pi / 2)
         phase = torch.stack([px, py, u(0.0, two_pi, (k,))], dim=-1)
 
-        half = self.xy_range[1]
-        reach = torch.hypot(ax, ay)  # raggio della circonferenza che contiene la curva
-        cxy = u(-1.0, 1.0, (k, 2)) * (half - reach).clamp(min=0.0)[:, None]
-        cz = u(self.z_range[0], self.z_range[1], (k,))
-        cz = torch.minimum(torch.maximum(cz, self.z_range[0] + az), self.z_range[1] - az)
-        center = torch.cat([cxy, cz[:, None]], dim=-1)
+        lo = torch.tensor([self.xy_range[0], self.xy_range[0], self.z_range[0]], device=self.device)
+        hi = torch.tensor([self.xy_range[1], self.xy_range[1], self.z_range[1]], device=self.device)
+        center = lo + ext + u(0.0, 1.0, (k, 3)) * (hi - lo - 2.0 * ext).clamp(min=0.0)
 
-        # Yaw: fisso, nel verso di marcia (solo se la velocità non si annulla mai: non per la retta) o in rotazione lenta
+        # Yaw: fisso, nel verso di marcia (solo se la velocità orizzontale non si annulla: non per la retta, né se il
+        # piano della curva è molto inclinato, cioè asse locale z a più di 25° dalla verticale) o in rotazione lenta
         draw = u(0.0, 1.0, (k,))
         yaw_mode = torch.where(draw < 0.35, torch.ones_like(kind), torch.where(draw < 0.65, 2 * torch.ones_like(kind), torch.zeros_like(kind)))
-        yaw_mode = torch.where((yaw_mode == 1) & is_line, torch.zeros_like(yaw_mode), yaw_mode)
+        flat = rot[:, 2, 2].abs() > math.cos(math.radians(25.0))
+        yaw_mode = torch.where((yaw_mode == 1) & (is_line | ~flat), torch.zeros_like(yaw_mode), yaw_mode)
         yaw_rate = torch.where(torch.rand(k, device=self.device, generator=self._gen) < 0.5, -1.0, 1.0) * u(0.1, 0.4, (k,))
         return {
             "kind": kind,
@@ -162,7 +185,7 @@ class TargetHandler:
             "amp": amp,
             "omega": omega,
             "phase": phase,
-            "psi": u(0.0, two_pi, (k,)),
+            "rot": rot,
             "yaw_mode": yaw_mode,
             "yaw0": u(-math.pi, math.pi, (k,)),
             "yaw_rate": yaw_rate,
@@ -174,15 +197,8 @@ class TargetHandler:
         p = self.tr
         th = p["omega"] * t[:, None] + p["phase"]
         s, c = torch.sin(th), torch.cos(th)
-        lx, ly = p["amp"][:, 0] * s[:, 0], p["amp"][:, 1] * s[:, 1]
-        vlx = p["amp"][:, 0] * p["omega"][:, 0] * c[:, 0]
-        vly = p["amp"][:, 1] * p["omega"][:, 1] * c[:, 1]
-        cp, sp = torch.cos(p["psi"]), torch.sin(p["psi"])
-        pos = torch.stack(
-            [p["center"][:, 0] + cp * lx - sp * ly, p["center"][:, 1] + sp * lx + cp * ly, p["center"][:, 2] + p["amp"][:, 2] * s[:, 2]],
-            dim=-1,
-        )
-        vel = torch.stack([cp * vlx - sp * vly, sp * vlx + cp * vly, p["amp"][:, 2] * p["omega"][:, 2] * c[:, 2]], dim=-1)
+        pos = p["center"] + torch.einsum("nij,nj->ni", p["rot"], p["amp"] * s)
+        vel = torch.einsum("nij,nj->ni", p["rot"], p["amp"] * p["omega"] * c)
         heading = torch.atan2(vel[:, 1], vel[:, 0])
         yaw = torch.where(
             p["yaw_mode"] == 1, heading, torch.where(p["yaw_mode"] == 2, _wrap_to_pi(p["yaw0"] + p["yaw_rate"] * t), p["yaw0"])

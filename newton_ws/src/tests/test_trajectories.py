@@ -61,6 +61,25 @@ for name, kind in KIND_NAMES.items():
         p_prev, v_prev = p, v
     print(f"  {name:8s} dentro i limiti {ok(inside, name + ' limiti')} | |v| max (norma) {vmax:.2f} m/s {ok(vmax <= 0.5 + 1e-4, name + ' vmax')} | scarto derivata {derr:.4f} m/s {ok(derr < 0.02, name + ' derivata')}")
 
+print("3b) Orientamento 3D: le curve non stanno tutte sul piano orizzontale")
+th = TargetHandler(2048, dev, seed=7, traj_prob=1.0, traj_speed_range=(0.3, 0.5))
+ts = torch.arange(0, 400, device=dev) * 0.1  # 40 s
+pos = torch.stack([th._curve(torch.full((2048,), float(t), device=dev))[0] for t in ts])  # (T, N, 3)
+zext = pos[..., 2].amax(0) - pos[..., 2].amin(0)
+xyext = (pos[..., :2].amax(0) - pos[..., :2].amin(0)).amax(-1)
+kinds = th.tr["kind"]
+nl = kinds != 0
+print(f"  escursione verticale: mediana {float(zext.median()):.2f} m, massima {float(zext.max()):.2f} m (campo z 1.0 m)", ok(float(zext.max()) > 0.6 and float(zext.max()) <= 1.0 + 1e-3, "z estensione"))
+print(f"  curve con escursione verticale > 0.2 m: {100 * float((zext > 0.2).float().mean()):.0f}%  | quasi orizzontali (< 0.05 m): {100 * float((zext < 0.05).float().mean()):.0f}%", ok(float((zext > 0.2).float().mean()) > 0.5, "3D"))
+print("  tutte dentro i limiti (x, y ±1.5, z 0.5-1.5)", ok(bool((pos[..., :2].abs() <= 1.5 + 1e-4).all() and (pos[..., 2] >= 0.5 - 1e-4).all() and (pos[..., 2] <= 1.5 + 1e-4).all()), "limiti 3D"))
+rot = th.tr["rot"]
+print("  matrici di rotazione ortonormali", ok(bool((rot @ rot.transpose(1, 2) - torch.eye(3, device=dev)).abs().max() < 1e-4), "rotazioni"))
+print("  yaw nel verso di marcia continuo (nessun salto > 0.5 rad per passo di 0.1 s)", end=" ")
+yaws = torch.stack([th._curve(torch.full((2048,), float(t), device=dev))[2] for t in ts])
+dj = torch.atan2(torch.sin(yaws[1:] - yaws[:-1]), torch.cos(yaws[1:] - yaws[:-1])).abs()
+head = th.tr["yaw_mode"] == 1
+print(f"(max {float(dj[:, head].max()):.2f} rad)", ok(float(dj[:, head].max()) < 0.5, "yaw continuo"))
+
 # ---------------------------------------------------------------------------------------------- 4
 print("4) Il tempo scorre: il riferimento si muove, step_target è il punto nuovo; i waypoint restano fermi")
 th = TargetHandler(64, dev, seed=3, traj_prob=0.5, traj_speed_range=(0.3, 0.5))
