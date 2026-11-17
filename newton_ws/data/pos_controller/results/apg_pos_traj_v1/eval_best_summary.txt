@@ -1,0 +1,16 @@
+apg_pos_traj_v1 (best.pt) - valutazione, drone 0, seed 1760261408, 40 ms/passo
+passi di controllo registrati: 501 (20.0 s)
+
+                     min        max     limite
+spinta [N]          0.002     1.194   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0077   +0.0049   ±0.0210
+momento y [N·m]   -0.0089   +0.0094   ±0.0210
+momento z [N·m]   -0.0027   +0.0055   ±0.0085
+
+|v lineare| max nel corpo [m/s]:  x 0.79  y 0.46  z 0.88   (norma max 1.20)
+|ω| max nel corpo [rad/s]:       x 3.60  y 3.21  z 1.58
+
+riferimenti di velocità comandati dalla rete di posizione (max in modulo, campo ±1, ±1, ±1 m/s e ±1.5 rad/s):
+  vx 0.86  vy 0.71  vz 1.00 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 0.0%  vy 0.0%  vz 0.4%  wz 9.0%
+
+passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  spinta 0.2%  Mx 0.0%  My 0.0%  Mz 0.0%
