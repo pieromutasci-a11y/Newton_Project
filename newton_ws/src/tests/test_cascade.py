@@ -32,7 +32,7 @@ print("  parametri della posizione con gradiente:", ok(all(p.requires_grad for p
 policy.train()
 print("  dopo policy.train() la rete di velocità è ancora in eval():", ok(not policy.vel_policy.training and policy.training))
 stats = [policy.vel_policy.obs_mean.clone(), policy.vel_policy.obs_var.clone(), policy.vel_policy.obs_count.clone()]
-x = torch.randn(256, 18, device=dev)
+x = torch.randn(256, 33, device=dev)
 for _ in range(5):
     policy(x)
     env.step(torch.zeros(N, 4, device=dev))
@@ -51,7 +51,7 @@ before = (fresh.vel_policy.eval()(vobs) - policy.vel_policy(vobs)).abs().max().i
 fresh.load_state_dict(sd)
 after = (fresh.vel_policy.eval()(vobs) - policy.vel_policy(vobs)).abs().max().item()
 print(f"  rete di velocità diversa prima del caricamento ({before:.3f}), identica dopo ({after:.1e}):", ok(before > 1e-3 and after < 1e-6))
-x = torch.randn(64, 18, device=dev)
+x = torch.randn(64, 33, device=dev)
 print("  la posizione dà le stesse uscite dopo il caricamento:", ok(torch.equal(policy.eval()(x), fresh.eval()(x))))
 policy.train()
 

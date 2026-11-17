@@ -4,12 +4,13 @@
 # Controllo a cascata: le azioni sono i 4 riferimenti di velocità (vx, vy, vz, wz) per la rete di velocità,
 # che sta sotto, congelata (controllers/vel_controller/mlp_config.yaml).
 mlp:
-  # Osservazioni (18), nell'ordine in cui le costruisce PosControllerEnv.observations():
+  # Osservazioni (33), nell'ordine in cui le costruisce PosControllerEnv.observations():
   #   errore di posizione nel sistema del corpo (3) + sin/cos dell'errore di yaw (2)
   #   + velocità lineare nel corpo (3) + velocità angolare nel corpo (3)
   #   + gravità proiettata nel corpo (3) + azione precedente (4: i riferimenti di velocità del passo prima)
+  #   + anteprima del riferimento: 3 punti futuri x (incremento di posizione nel corpo (3) + sin/cos del delta yaw (2))
   # Deve coincidere con PosControllerEnv.obs_dim (controllato all'avvio del training).
-  input_dim: 18
+  input_dim: 33
 
   # Azioni (4), normalizzate in [-1, 1]: riferimenti di velocità vx, vy, vz, wz (l'env li moltiplica per
   # la scala (1, 1, 1, 1.5): m/s e rad/s, nel sistema del corpo).

@@ -3,7 +3,7 @@
 Riassunto di dove siamo arrivati e di cosa vogliamo fare, per riprendere il lavoro (anche su un'altra
 macchina o con una nuova sessione di Claude: leggere questo file per primo).
 
-Ultimo aggiornamento: 16/11/2026.
+Ultimo aggiornamento: 17/11/2026.
 
 ## 1. Obiettivo
 
@@ -20,6 +20,9 @@ con il progetto Isaac Lab** esistente (DJI Tello, PPO/IPPO):
 1. Controllore di **velocità** addestrato (`apg_vel_v7`, scelto e congelato).
 2. Controllore di **posizione** addestrato sopra la rete di velocità congelata (`apg_pos_cascade_v1..v3`).
 3. Valutazione con GUI e grafici per entrambi.
+
+**Ramo `traiettorie`** (non ancora addestrato): il controllore di posizione riceve anche una **finestra di anteprima** del riferimento e viene
+addestrato su un mix di waypoint fermi e traiettorie continue (vedi 4.5). `main` resta la versione a 18 osservazioni, già addestrata.
 
 Il multi-drone vero e proprio (più droni nello stesso mondo) è il passo finale, non ancora iniziato.
 
@@ -69,10 +72,10 @@ src/
       vel_controller_env.py           # VelControllerEnv + vel_observations (funzione unica, usata anche dalla cascata)
       ref_handler.py                  # RefHandler: riferimenti di velocità a tempo, 5 modalità, senza curriculum
     pos_controller/                   # anello esterno, 25 Hz: posizione e yaw -> 4 riferimenti di velocità
-      mlp_config.yaml                 # rete: 18 -> [256,128,64] ELU -> 4 tanh (separata da quella di velocità)
+      mlp_config.yaml                 # rete: 33 -> [256,128,64] ELU -> 4 tanh (separata da quella di velocità)
       pos_controller_mlp.py           # PosControllerMLP + rete di velocità CONGELATA dentro (vel_policy)
       pos_controller_env.py           # PosControllerEnv: cascata (2 passi di rete di velocità per passo di posizione)
-      target_handler.py               # TargetHandler: coda di riferimenti casuali (x, y, z, yaw)
+      target_handler.py               # TargetHandler: waypoint casuali (x, y, z, yaw) oppure traiettorie continue + finestra di anteprima
   train/
     cost_function_vel_controller.py   # costo di velocità
     cost_function_pos_controller.py   # costo di posizione
@@ -83,7 +86,7 @@ src/
     plots_vel_controller.py           # grafici e riepilogo velocità
     eval_pos_controller_policy.py     # GUI posizione: 5 riferimenti, sfere, frecce di yaw, poi chiude e salva i grafici
     plots_pos_controller.py           # 3 figure: posizione/yaw, velocità, spinta e momenti
-  tests/                              # test_pos_env, test_vel_env, test_cascade, test_cost_function, test_vel_cost, test_decimation, test_train_world, grad_check, ...
+  tests/                              # test_pos_env, test_vel_env, test_cascade, test_trajectories, test_cost_function, test_vel_cost, test_decimation, test_train_world, grad_check, ...
 data/                                 # una cartella per controllore, ciascuna con policy/ e results/
   vel_controller/{policy,results}/<run>/
   pos_controller/{policy,results}/<run>/
@@ -144,9 +147,9 @@ env + costo (PyTorch) -> loss;  backward: tape.backward() ripercorre i kernel al
   Il checkpoint della posizione la contiene: la valutazione carica un solo file. I vecchi checkpoint di posizione (uscita = spinta e momenti) non sono compatibili.
 - **Azioni della posizione = riferimenti di velocità**; l'azione precedente nelle osservazioni (4) è il riferimento del passo prima. Uscita iniziale ~0: il drone parte in hover.
   Il termine `effort` del costo penalizza |riferimento|².
-- **Osservazioni (18):** errore di posizione **nel sistema del corpo** (3), sin/cos errore di yaw (2), velocità lineare (3) e angolare (3) nel corpo,
-  gravità proiettata (3), azione precedente (4).
-- **Riferimenti (come Isaac Lab):** coda di **3 waypoint** per episodio (x, y ∈ ±1.5 m, z ∈ 0.5-1.5 m, yaw ∈ ±π). Si avanza entro **0.15 m e 0.2 rad per 1.2 s**.
+- **Osservazioni (33):** errore di posizione **nel sistema del corpo** (3), sin/cos errore di yaw (2), velocità lineare (3) e angolare (3) nel corpo,
+  gravità proiettata (3), azione precedente (4) + anteprima del riferimento (15, vedi 4.5).
+- **Riferimenti waypoint (come Isaac Lab):** coda di **3 waypoint** per episodio (x, y ∈ ±1.5 m, z ∈ 0.5-1.5 m, yaw ∈ ±π). Si avanza entro **0.15 m e 0.2 rad per 1.2 s**.
   Episodio da **15 s**. Reset anche per inclinazione > 65°, stato non finito o drone oltre 20 m.
 - **Training:** `--horizon 32` passi di posizione per finestra, 4096 mondi, Adam, lr 1e-3, `--grad_clip 1.0`; gli aggiornamenti con gradiente non finito sono saltati.
 - **Costo** (`cost_function_pos_controller.py`):
@@ -156,13 +159,29 @@ env + costo (PyTorch) -> loss;  backward: tape.backward() ripercorre i kernel al
 | posizione, ampio raggio | 1.0 · (1 − e^(−0.5 d)) | avvicinarsi |
 | posizione, precisione | 1.4 · (1 − e^(−8 d)) | arrivare sul bersaglio |
 | yaw | 0.32 · \|err\| e 0.32 · (1 − e^(−7 \|err\|)) | allinearsi |
-| velocità lineare | 0.1 · v² (+ 0.5 · v² entro 0.5 m: frenata) | limita la velocità |
+| velocità lineare | 0.1 · \|v − v_rif\|² (+ 0.5 · \|v − v_rif\|² entro 0.5 m: frenata) | limita la velocità (v_rif = 0 per i waypoint) |
 | velocità angolare | 0.01 · (ωx² + ωy²); 0.002 su z | smorza rotazioni |
 | assetto | 0.5 · (1 − cos tilt); 10 · eccesso² oltre 25° | limita l'inclinazione |
 | azioni | 0.1 · Δazione²; 0.01 · \|riferimento\|² | comandi lisci |
 
 I pesi di posizione e yaw sono quelli di Isaac Lab divisi per 25; gli altri sono stime tarate a mano. Si cambiano con `--cost nome=valore`.
 I pesi per la cascata non sono ancora stati ritarati: sono quelli del controllore che comandava direttamente spinta e momenti.
+
+### 4.5 Traiettorie continue e finestra di anteprima (ramo `traiettorie`)
+
+Come in Isaac Lab (`wp_preview_horizon`), la rete vede una **finestra** sul riferimento: l'errore verso il punto attuale più 3 punti futuri come
+**incrementi** tra punti consecutivi (nel corpo) con sin/cos del delta di yaw. Una traiettoria è per la rete una coda di waypoint molto fitti.
+
+- **Waypoint fermi:** i punti futuri coincidono con quello attuale, quindi la finestra è nulla (incrementi 0, sin 0, cos 1) e il comportamento è quello di prima
+  (nessuna anteprima: evita il ciclo limite attorno al bersaglio visto in Isaac Lab quando si anticipa il waypoint successivo).
+- **Traiettorie:** curve nel tempo (`TargetHandler`), valutate a t, t+0.5, t+1.0, t+1.5 s. Tipi: retta, cerchio, ellisse, otto, elica (cerchio con quota che oscilla).
+  Picco di velocità in 0.1-0.5 m/s (`--traj_speed_min/max`), dentro il campo dei waypoint (x, y ±1.5 m, z 0.5-1.5 m). Yaw: fisso, nel verso di marcia
+  (non per la retta) o in rotazione lenta (0.1-0.4 rad/s). Il riferimento scorre da solo: nessun avanzamento per raggiungimento, episodio da 15 s;
+  il drone parte fermo entro 0.3 m dal punto iniziale.
+- **Mix per episodio:** `--traj_prob` (default 0.5): ogni episodio, a ogni reset, è una traiettoria con questa probabilità, altrimenti una coda di 3 waypoint.
+- **Costo:** nel termine `lin_vel` e nella frenata si usa la velocità **relativa** a quella del riferimento (per i waypoint è 0, quindi identico a prima).
+- **Costo di calcolo:** circa 300 ms per iterazione con 4096 mondi (anche con `--traj_prob 0`: il peso è nelle piccole operazioni sul riferimento e nella cascata).
+- **Non ancora fatto:** training vero, curriculum sulla velocità, anteprima anche sui waypoint con attenuazione vicino al bersaglio (`preview_attenuazione_dist` di Isaac Lab).
 
 ## 5. Comandi
 
@@ -173,8 +192,9 @@ docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train
   --log_interval 50 --ckpt_interval 200 --run_name <nome>
 
 # training del controllore di posizione sopra la rete di velocità congelata (salva in data/pos_controller/)
+# --traj_prob: frazione di episodi con traiettoria continua (default 0.5; 0 = solo waypoint); --traj_speed_min/max: picco di velocità [m/s]
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train/train_APG_pos_controller.py \
-  --vel_run apg_vel_v7 [--vel_ckpt best|last] --num_envs 4096 --horizon 32 --iterations 3000 --lr 1e-3 --grad_clip 1.0 \
+  --vel_run apg_vel_v7 [--vel_ckpt best|last] [--traj_prob 0.5] --num_envs 4096 --horizon 32 --iterations 3000 --lr 1e-3 --grad_clip 1.0 \
   --log_interval 50 --ckpt_interval 200 --run_name <nome>
 
 # valutazione della velocità con GUI (3 riferimenti casuali, poi chiude; salva in data/vel_controller/results/<nome>/)
@@ -182,13 +202,16 @@ docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/
 # idem, riferimento fisso scelto a mano (assi non indicati = 0; --duration, default 10 s)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> --vx 0.5 --vy -0.3 [--vz 0.2] [--wz 1.0] [--duration 10]
 
+# valutazione con traiettoria continua (tipo: line, circle, ellipse, eight, helix; --speed = picco di velocità in m/s; --duration default 20 s)
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4
+
 # valutazione della posizione con GUI (5 riferimenti casuali, poi chiude; salva 3 grafici e il riepilogo in data/pos_controller/results/<nome>/)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> [--ckpt last] [--n_waypoints 5] [--seed N]
 # idem, bersaglio fisso (x, y, z in metri e yaw in GRADI; assi non indicati = quelli di partenza; --duration, default 10 s)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --x 1.0 --y -0.5 [--z 1.2] [--yaw 90] [--duration 10]
 
 # test (secondi)
-for t in test_pos_env test_cost_function test_decimation test_cascade test_vel_env test_vel_cost; do
+for t in test_pos_env test_cost_function test_decimation test_cascade test_trajectories test_vel_env test_vel_cost; do
   docker exec newton-lab-Mutasci python /workspace/project_workspace/src/tests/$t.py; done
 
 # curve di training
@@ -220,7 +243,8 @@ Se manca il container: `docker run --rm --gpus all` con i volumi di `run.sh`.
 
 Prossimi passi, in ordine indicativo:
 
-1. **Valutare e ritarare il controllore di posizione in cascata** (`apg_pos_cascade_v3` è l'ultimo): confrontare precisione, tempi di arrivo e aggressività con il vecchio controllo diretto.
+1. **Addestrare sul ramo `traiettorie`** (waypoint + traiettorie, 33 osservazioni) e confrontare con `apg_pos_cascade_v3` (waypoint) e l'errore di inseguimento
+   su cerchi, otto, ellissi, eliche. Poi eventuale curriculum sulla velocità e anteprima anche sui waypoint. Se non funziona: `git switch main`.
 2. **Realismo, uno alla volta:** resistenza dell'aria lineare e quadratica in `apply_wrench`, disturbi (vento/forze casuali), ritardo e filtro del primo ordine sui motori,
    rumore sulle osservazioni (anche in valutazione), variazione di massa e spinta. Si parte da resistenza + un disturbo.
 3. **Multi-drone:** una sola rete con pesi condivisi usata in modo decentralizzato da ogni drone (funziona anche con un drone solo), osservazioni dei vicini a slot

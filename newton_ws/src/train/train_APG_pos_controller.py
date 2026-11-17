@@ -32,6 +32,7 @@ import torch
 
 from controllers.pos_controller.pos_controller_env import PosControllerEnv
 from controllers.pos_controller.pos_controller_mlp import PosControllerMLP
+from controllers.pos_controller.target_handler import TargetHandler
 from drone_model.params import DroneParams
 from scene.train_world import TrainWorld, TrainWorldConfig
 from train.cost_function_pos_controller import CostWeights, cost_function, make_hover_command
@@ -57,6 +58,9 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-3, help="learning rate di Adam")
     p.add_argument("--grad_clip", type=float, default=1.0, help="norma massima del gradiente")
     p.add_argument("--episode_s", type=float, default=15.0, help="durata massima di un episodio [s]")
+    p.add_argument("--traj_prob", type=float, default=0.5, help="probabilità che un episodio sia una traiettoria continua (0: solo waypoint)")
+    p.add_argument("--traj_speed_min", type=float, default=0.1, help="picco di velocità delle traiettorie, minimo [m/s]")
+    p.add_argument("--traj_speed_max", type=float, default=0.5, help="picco di velocità delle traiettorie, massimo [m/s]")
     p.add_argument(
         "--cost", action="append", default=[], metavar="NOME=VALORE",
         help="sovrascrive un peso di CostWeights (ripetibile), es. --cost action_rate=0.5 --cost lin_vel=0.05",
@@ -104,7 +108,10 @@ def main():
     world = TrainWorld(params, TrainWorldConfig(num_worlds=args.num_envs, horizon=2 * args.horizon, decimation=2))
     policy = PosControllerMLP(vel_ckpt=vel_path).to(dev)  # rete di posizione + rete di velocità congelata
     vel_meta = torch.load(vel_path, map_location="cpu")  # solo per registrare da dove arriva
-    env = PosControllerEnv(world, policy.vel_policy, seed=args.seed, max_episode_s=args.episode_s)
+    targets = TargetHandler(
+        args.num_envs, dev, seed=args.seed, dt=0.04, traj_prob=args.traj_prob, traj_speed_range=(args.traj_speed_min, args.traj_speed_max)
+    )
+    env = PosControllerEnv(world, policy.vel_policy, targets, seed=args.seed, max_episode_s=args.episode_s)
     assert policy.input_dim == env.obs_dim and policy.output_dim == env.action_dim, (
         f"mlp_config.yaml ({policy.input_dim} -> {policy.output_dim}) non coincide con "
         f"l'env ({env.obs_dim} -> {env.action_dim})"
@@ -158,6 +165,11 @@ def main():
             acc["metric/tilt_deg"] = acc.get("metric/tilt_deg", 0.0) + torch.rad2deg(
                 torch.acos(torch.clamp(-e.gravity_b[:, 2], -1.0, 1.0))
             ).mean()
+            traj = env.targets.is_traj.float()
+            d = torch.sqrt(e.pos_err.pow(2).sum(-1))
+            acc["metric/traj_frac"] = acc.get("metric/traj_frac", 0.0) + traj.mean()
+            acc["metric/dist_traj_m"] = acc.get("metric/dist_traj_m", 0.0) + (d * traj).sum() / traj.sum().clamp(min=1.0)
+            acc["metric/dist_wp_m"] = acc.get("metric/dist_wp_m", 0.0) + (d * (1 - traj)).sum() / (1 - traj).sum().clamp(min=1.0)
             acc["metric/waypoint_idx"] = acc.get("metric/waypoint_idx", 0.0) + env.targets.wp_idx.float().mean()
             acc["metric/reset_frac"] = acc.get("metric/reset_frac", 0.0) + env.done().float().mean()
 
@@ -187,7 +199,7 @@ def main():
             fps = args.num_envs * args.horizon / dt_iter
             print(
                 f"[{it:5d}/{args.iterations}] loss {means['loss']:.4f} | dist {means['metric/dist_m']:.3f} m | "
-                f"yaw {means['metric/yaw_err_deg']:.1f}° | tilt {means['metric/tilt_deg']:.1f}° | "
+                f"(wp {means['metric/dist_wp_m']:.3f} / traj {means['metric/dist_traj_m']:.3f}) | yaw {means['metric/yaw_err_deg']:.1f}° | tilt {means['metric/tilt_deg']:.1f}° | "
                 f"wp {means['metric/waypoint_idx']:.2f} | reset {means['metric/reset_frac']:.3f} | |grad| {means['grad_norm']:.3f} | "
                 f"{dt_iter * 1000:.0f} ms/it ({fps / 1e6:.2f} M passi/s)" + (f" | saltate {skipped}" if skipped else "")
             )

@@ -93,7 +93,10 @@ def cost_function(
 
     dist = _smooth_norm(e.pos_err)  # distanza dal bersaglio [m]
     yaw_abs = torch.sqrt(_wrap_to_pi(e.yaw_err).pow(2) + 1e-12)  # |errore di yaw| in [0, pi]
-    lin_vel_sq = e.lin_vel_b.pow(2).sum(dim=-1)
+    # Velocità rispetto a quella del riferimento: per i waypoint (fermi) è la velocità assoluta, per una traiettoria
+    # il drone non viene frenato mentre deve muoversi con la curva
+    rel_vel = e.lin_vel_b if e.ref_vel_b is None else e.lin_vel_b - e.ref_vel_b
+    lin_vel_sq = rel_vel.pow(2).sum(dim=-1)
 
     one_minus_cos_tilt = 1.0 + e.gravity_b[:, 2]  # 0 se dritto (gravity_b z = -1), 1 se orizzontale
     tilt_excess = torch.relu(one_minus_cos_tilt - (1.0 - math.cos(math.radians(w.tilt_free_deg))))

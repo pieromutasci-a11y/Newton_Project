@@ -13,6 +13,10 @@ tutta la prova; gli assi non indicati restano quelli di partenza del drone (yaw 
     python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --x 1.0 --y -0.5 --z 1.2
     python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --z 1.5 --yaw 90 --duration 15
 
+Traiettoria continua: con --traj {line,circle,ellipse,eight,helix} (e --speed, picco di velocità in m/s, default 0.3)
+il riferimento percorre una curva casuale di quel tipo per --duration secondi (default 20); la curva è disegnata in verde:
+    python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4
+
 Senza display: --viewer null (stampa solo le metriche).
 """
 
@@ -66,6 +70,10 @@ class Example:
         # Nessun reset in valutazione: la sequenza viene percorsa una volta sola e poi la valutazione si chiude.
         given = [args.x, args.y, args.z, args.yaw]
         self.fixed = any(v is not None for v in given)  # riferimento scelto a mano: uno solo, fisso
+        self.traj = args.traj is not None  # traiettoria continua: dura --duration secondi
+        assert not (self.fixed and self.traj), "scegli o un riferimento fisso (--x --y --z --yaw) o una traiettoria (--traj)"
+        self.timed = self.fixed or self.traj  # prova a durata fissa invece che a sequenza di waypoint
+        self.duration = args.duration if args.duration is not None else (20.0 if self.traj else 10.0)
         targets = TargetHandler(args.num_drones, dev, seed=self.seed, n_waypoints=1 if self.fixed else args.n_waypoints)
 
         # Rete addestrata: posizione + rete di velocità congelata (nello stesso checkpoint, con le statistiche di normalizzazione)
@@ -95,9 +103,16 @@ class Example:
                 print(f"ATTENZIONE: --yaw è in GRADI: {args.yaw} sono {args.yaw:.1f}°, quasi zero. Se intendevi radianti, scrivi --yaw {math.degrees(args.yaw):.0f}")
             d0 = 0
             print(
-                f"Riferimento FISSO per {args.duration:.0f} s (drone 0): x {float(target[d0, 0]):+.2f}  y {float(target[d0, 1]):+.2f}  "
+                f"Riferimento FISSO per {self.duration:.0f} s (drone 0): x {float(target[d0, 0]):+.2f}  y {float(target[d0, 1]):+.2f}  "
                 f"z {float(target[d0, 2]):+.2f} m,  yaw {math.degrees(float(yaw[d0])):+.0f}°  (partenza x {float(start[d0, 0]):+.2f}  y {float(start[d0, 1]):+.2f}  z {float(start[d0, 2]):+.2f})"
             )
+        if self.traj:
+            targets.set_trajectory(args.traj, args.speed)
+            # Il drone parte fermo vicino al punto iniziale della curva (entro 0.3 m), come nel training
+            near = targets.target_pos + (torch.rand(args.num_drones, 3, device=dev) * 2.0 - 1.0) * 0.3
+            near[:, 2] = near[:, 2].clamp(min=0.3)
+            self.world.reset(torch.arange(args.num_drones, device=dev), near)
+            print(f"Traiettoria '{args.traj}', picco di velocità {args.speed:.2f} m/s, {self.duration:.0f} s")
         self.finished = False
         self.args = args
         self.params = DroneParams()
@@ -125,6 +140,11 @@ class Example:
         self.target_xf[:, 6] = 1.0
         self.viewer.set_model(self.world.model)
         self.viewer.set_camera(wp.vec3(4.0, -4.0, 2.5), pitch=-20.0, yaw=135.0)
+        if self.traj:  # la curva intera (percorsa a velocità costante nel tempo della prova), come linee verde-chiaro
+            k = 120
+            pts = torch.stack([targets._curve(torch.full((args.num_drones,), i * self.duration / k, device=dev))[0] for i in range(k + 1)])
+            self.path_a = wp.from_torch(pts[:-1].reshape(-1, 3).contiguous(), dtype=wp.vec3)
+            self.path_b = wp.from_torch(pts[1:].reshape(-1, 3).contiguous(), dtype=wp.vec3)
 
     @torch.no_grad()
     def step(self):
@@ -160,10 +180,10 @@ class Example:
             ahead = self.t_start + self.sim_time - time.perf_counter()
             if ahead > 0:
                 time.sleep(ahead)
-        if self.fixed and self.sim_time >= self.args.duration:
-            print(f"\nRiferimento fisso mantenuto per {self.sim_time:.1f} s: valutazione chiusa.")
+        if self.timed and self.sim_time >= self.duration:
+            print(f"\n{'Traiettoria percorsa' if self.traj else 'Riferimento fisso mantenuto'} per {self.sim_time:.1f} s: valutazione chiusa.")
             self.finished = True
-        elif not self.fixed and bool(self.env.sequence_done().all()):
+        elif not self.timed and bool(self.env.sequence_done().all()):
             print(f"\nSequenza di {self.env.targets.n_waypoints} riferimenti completata a t = {self.sim_time:.1f} s.")
             self.finished = True
         elif self.sim_time >= self.args.max_s:
@@ -186,6 +206,8 @@ class Example:
         target_xf = wp.from_torch(self.target_xf, dtype=wp.transform)
         self.viewer.log_shapes("/targets", newton.GeoType.SPHERE, (TARGET_RADIUS,), target_xf, self.target_colors)
         self.viewer.log_lines("/target_links", drones, targets, LINK_COLOR)  # drone -> riferimento
+        if self.traj:
+            self.viewer.log_lines("/trajectory", self.path_a, self.path_b, (0.3, 0.9, 0.4))
         # Proiezioni verticali sul pavimento (aiutano a leggere altezza e posizione): drone e riferimento
         pd, pt = self.world.pos.contiguous().clone(), self.env.targets.target_pos.contiguous().clone()
         pd[:, 2], pt[:, 2] = 0.004, 0.004
@@ -228,7 +250,9 @@ if __name__ == "__main__":
     parser.add_argument("--y", type=float, default=None, help="riferimento fisso di y [m]")
     parser.add_argument("--z", type=float, default=None, help="riferimento fisso di z [m]")
     parser.add_argument("--yaw", type=float, default=None, help="riferimento fisso di yaw [GRADI]")
-    parser.add_argument("--duration", type=float, default=10.0, help="durata della prova con riferimento fisso [s]")
+    parser.add_argument("--duration", type=float, default=None, help="durata della prova con riferimento fisso (default 10 s) o traiettoria (default 20 s) [s]")
+    parser.add_argument("--traj", choices=["line", "circle", "ellipse", "eight", "helix"], default=None, help="traiettoria continua invece dei waypoint")
+    parser.add_argument("--speed", type=float, default=0.3, help="picco di velocità della traiettoria [m/s] (con --traj)")
     parser.add_argument("--n_waypoints", type=int, default=5, help="riferimenti da raggiungere prima di chiudere")
     parser.add_argument("--max_s", type=float, default=120.0, help="tempo massimo di simulazione [s], per non restare bloccati")
     parser.add_argument("--pace", action=argparse.BooleanOptionalAction, default=True, help="simula a tempo reale")

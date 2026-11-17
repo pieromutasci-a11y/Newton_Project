@@ -47,17 +47,22 @@ class Errors:
 
     pos_err: torch.Tensor  # (N, 3) riferimento - posizione, nel sistema del mondo [m]
     yaw_err: torch.Tensor  # (N,) yaw di riferimento - yaw del drone [rad]
-    lin_vel_b: torch.Tensor  # (N, 3) velocità lineare nel sistema del corpo (errore rispetto a velocità nulla)
+    lin_vel_b: torch.Tensor  # (N, 3) velocità lineare nel sistema del corpo
     ang_vel_b: torch.Tensor  # (N, 3) velocità angolare nel sistema del corpo
     gravity_b: torch.Tensor  # (N, 3) gravità proiettata nel corpo: (0, 0, -1) se il drone è dritto
+    # (N, 3) velocità del riferimento nel sistema del corpo: nulla per i waypoint, quella della curva per le traiettorie.
+    # None = nulla (il costo la tratta come zero).
+    ref_vel_b: torch.Tensor | None = None
 
 
 class PosControllerEnv:
-    # Osservazioni (18): errore di posizione nel sistema del corpo (3) + sin/cos dell'errore di yaw (2)
-    #   + velocità lineare nel corpo (3) + velocità angolare nel corpo (3)
+    # Osservazioni (18 + 5 * (window_points - 1) = 33): errore di posizione nel sistema del corpo (3) + sin/cos
+    #   dell'errore di yaw (2) + velocità lineare nel corpo (3) + velocità angolare nel corpo (3)
     #   + gravità proiettata nel corpo (3) + azione precedente (4)
-    # Devono coincidere con input_dim e output_dim di mlp_config.yaml.
-    obs_dim = 18
+    #   + anteprima: per ognuno dei window_points - 1 punti futuri, incremento di posizione rispetto al punto prima
+    #     nel sistema del corpo (3) + sin/cos dell'incremento di yaw (2). Tutti nulli (sin 0, cos 1) per i waypoint.
+    # Devono coincidere con input_dim e output_dim di mlp_config.yaml (self.obs_dim, dipende dalla finestra).
+    base_obs_dim = 18
     # Azioni (4), normalizzate in [-1, 1]: riferimenti di velocità vx, vy, vz, wz nel sistema del corpo; l'env li
     # moltiplica per vel_scale (m/s e rad/s) e li dà alla rete di velocità, che produce spinta e momenti.
     action_dim = 4
@@ -99,7 +104,8 @@ class PosControllerEnv:
         self.vel_scale = torch.tensor(vel_scale, device=self.device)
 
         # Riferimenti: se non ne viene passato uno, si usa quello di default (intervalli in target_handler.py)
-        self.targets = targets or TargetHandler(self.n, self.device, seed=seed)
+        self.targets = targets or TargetHandler(self.n, self.device, seed=seed, dt=control_dt)
+        self.obs_dim = self.base_obs_dim + 5 * (self.targets.window_points - 1)
 
         self.spawn_xy_range = spawn_xy_range
         self.spawn_z_range = spawn_z_range
@@ -164,11 +170,12 @@ class PosControllerEnv:
             self._hold_timer[advance] = 0.0
 
     def sequence_done(self) -> torch.Tensor:
-        """(N,) bool: il drone è sull'ULTIMO riferimento della coda e ci è rimasto per `hold_time_s`."""
-        return self.targets.is_last & (self._hold_timer >= self._hold_time_s)
+        """(N,) bool: il drone è sull'ULTIMO riferimento della coda e ci è rimasto per `hold_time_s`
+        (mai vero per le traiettorie: durano finché dura l'episodio)."""
+        return self.targets.is_last & ~self.targets.is_traj & (self._hold_timer >= self._hold_time_s)
 
     # ------------------------------------------------------------------ errori e osservazioni
-    def _compute_errors(self, target_pos: torch.Tensor, target_yaw: torch.Tensor) -> Errors:
+    def _compute_errors(self, target_pos: torch.Tensor, target_yaw: torch.Tensor, target_vel: torch.Tensor) -> Errors:
         q, qd = self.world.q, self.world.qd
         pos, quat = q[:, :3], q[:, 3:7]
         # Convenzione verificata: qd = (velocità lineare | velocità angolare), nel sistema del mondo
@@ -178,19 +185,29 @@ class PosControllerEnv:
             lin_vel_b=quat_rotate_inverse(quat, qd[:, :3]),
             ang_vel_b=quat_rotate_inverse(quat, qd[:, 3:6]),
             gravity_b=quat_rotate_inverse(quat, self._gravity_dir),
+            ref_vel_b=quat_rotate_inverse(quat, target_vel),
         )
 
     def errors(self) -> Errors:
         """Errori dopo l'ultimo passo, rispetto al riferimento che era attivo DURANTE quel passo (per il costo)."""
-        return self._compute_errors(self.targets.step_target_pos, self.targets.step_target_yaw)
+        t = self.targets
+        return self._compute_errors(t.step_target_pos, t.step_target_yaw, t.step_target_vel)
 
     def observations(self) -> torch.Tensor:
         """(N, obs_dim) osservazioni per la rete, rispetto al riferimento attuale."""
-        e = self._compute_errors(self.targets.target_pos, self.targets.target_yaw)
+        t = self.targets
+        e = self._compute_errors(t.target_pos, t.target_yaw, t.target_vel)
         # Errore di posizione nel sistema del CORPO (non del mondo): la rete deve sapere in che direzione del
         # drone si trova il bersaglio, cioè verso quale asse inclinarsi. Con l'errore nel mondo servirebbe
         # l'orientamento assoluto del drone per ruotarlo (in Isaac Lab c'era sin/cos dell'angolo di yaw assoluto).
-        pos_err_b = quat_rotate_inverse(self.world.q[:, 3:7], e.pos_err)
+        quat = self.world.q[:, 3:7]
+        pos_err_b = quat_rotate_inverse(quat, e.pos_err)
+        # Anteprima: incrementi tra i punti futuri del riferimento (nel corpo, come l'errore di posizione)
+        dpos, dyaw = t.window()  # (N, H-1, 3), (N, H-1)
+        h = dpos.shape[1]
+        dpos_b = quat_rotate_inverse(quat.repeat_interleave(h, dim=0), dpos.reshape(-1, 3)).reshape(self.n, h, 3)
+        # un blocco da 5 per punto futuro: incremento di posizione (3) + sin/cos dell'incremento di yaw (2)
+        preview = torch.cat([dpos_b, torch.sin(dyaw).unsqueeze(-1), torch.cos(dyaw).unsqueeze(-1)], dim=-1).reshape(self.n, h * 5)
         return torch.cat(
             [
                 pos_err_b,
@@ -200,6 +217,7 @@ class PosControllerEnv:
                 e.ang_vel_b,
                 e.gravity_b,
                 self.prev_actions,
+                preview,
             ],
             dim=-1,
         )
@@ -211,6 +229,7 @@ class PosControllerEnv:
     def _reset_worlds(self, ids: torch.Tensor) -> None:
         """Riporta i droni `ids` a una posizione casuale, dritti e fermi, con nuovi riferimenti."""
         k = ids.numel()
+        self.targets.reset(ids)  # prima i riferimenti: le traiettorie decidono dove nasce il drone
         spawn = torch.stack(
             [
                 self._uniform(*self.spawn_xy_range, (k,)),
@@ -219,8 +238,11 @@ class PosControllerEnv:
             ],
             dim=-1,
         )
+        # Traiettoria: il drone nasce vicino al punto di partenza della curva (entro 0.3 m), fermo
+        near = self.targets.target_pos[ids] + self._uniform(-0.3, 0.3, (k, 3))
+        near[:, 2] = near[:, 2].clamp(min=0.3)
+        spawn = torch.where(self.targets.is_traj[ids][:, None], near, spawn)
         self.world.reset(ids, spawn)
-        self.targets.reset(ids)
         self._steps_alive[ids] = 0
         self._hold_timer[ids] = 0.0
         self.prev_actions = self.prev_actions.clone()
