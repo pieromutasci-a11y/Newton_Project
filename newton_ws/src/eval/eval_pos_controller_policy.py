@@ -14,7 +14,7 @@ tutta la prova; gli assi non indicati restano quelli di partenza del drone (yaw 
     python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --z 1.5 --yaw 90 --duration 15
 
 Traiettoria continua: con --traj {line,circle,ellipse,eight,helix,random} il riferimento percorre una curva di quel tipo
-(custom = somma di sinusoidi casuali; random = tipo standard casuale) con dimensioni, posizione e fase CASUALI per --duration secondi (default 20); la curva è disegnata
+(custom = somma di sinusoidi casuali; circuit = percorso lungo che avanza nello spazio come un circuito; random = tipo standard casuale) con dimensioni, posizione e fase CASUALI per --duration secondi (default 20); la curva è disegnata
 in verde. --orient flat (default) la tiene sul piano orizzontale xy (ruotata solo attorno a z), --orient 3d le dà un
 orientamento casuale nello spazio; --speed è il picco di velocità in m/s (default 0.3):
     python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4
@@ -116,6 +116,7 @@ class Example:
                 f"z {float(target[d0, 2]):+.2f} m,  yaw {math.degrees(float(yaw[d0])):+.0f}°  (partenza x {float(start[d0, 0]):+.2f}  y {float(start[d0, 1]):+.2f}  z {float(start[d0, 2]):+.2f})"
             )
         if self.traj:
+            targets.circuit_duration = self.duration + 2.0  # il circuito deve restare nel campo in z per tutta la prova
             targets.set_trajectory(args.traj, args.speed, {'flat': 1.0, '3d': 0.0}[args.orient])
             # Il drone parte fermo vicino al punto iniziale della curva (entro 0.3 m), come nel training
             near = targets.target_pos + (torch.rand(args.num_drones, 3, device=dev) * 2.0 - 1.0) * 0.3
@@ -260,7 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("--z", type=float, default=None, help="riferimento fisso di z [m]")
     parser.add_argument("--yaw", type=float, default=None, help="riferimento fisso di yaw [GRADI]")
     parser.add_argument("--duration", type=float, default=None, help="durata della prova con riferimento fisso (default 10 s) o traiettoria (default 20 s) [s]")
-    parser.add_argument("--traj", choices=["line", "circle", "ellipse", "eight", "helix", "custom", "random"], default=None, help="traiettoria continua invece dei waypoint (custom = somma di sinusoidi casuali; random = tipo standard casuale); dimensioni sempre casuali")
+    parser.add_argument("--traj", choices=["line", "circle", "ellipse", "eight", "helix", "custom", "circuit", "random"], default=None, help="traiettoria continua invece dei waypoint (custom = somma di sinusoidi casuali; circuit = percorso lungo che avanza nello spazio come un circuito; random = tipo standard casuale); dimensioni sempre casuali")
     parser.add_argument("--orient", choices=["flat", "3d"], default="flat", help="orientamento della traiettoria (con --traj): flat = sul piano orizzontale xy, 3d = orientamento casuale nello spazio")
     parser.add_argument("--speed", type=float, default=0.3, help="picco di velocità della traiettoria [m/s] (con --traj)")
     parser.add_argument("--n_waypoints", type=int, default=5, help="riferimenti da raggiungere prima di chiudere")

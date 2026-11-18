@@ -1,16 +1,16 @@
-apg_pos_traj_v1 (best.pt) - valutazione, drone 0, seed 1766526897, 40 ms/passo
-passi di controllo registrati: 501 (20.0 s)
+apg_pos_traj_v1 (best.pt) - valutazione, drone 0, seed 1861201391, 40 ms/passo
+passi di controllo registrati: 251 (10.0 s)
 
                      min        max     limite
-spinta [N]          0.328     1.524   0 .. 1.536  (hover 0.853)
-momento x [N·m]   -0.0104   +0.0073   ±0.0210
-momento y [N·m]   -0.0056   +0.0042   ±0.0210
-momento z [N·m]   -0.0024   +0.0035   ±0.0085
+spinta [N]          0.167     1.520   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0111   +0.0087   ±0.0210
+momento y [N·m]   -0.0030   +0.0024   ±0.0210
+momento z [N·m]   -0.0012   +0.0058   ±0.0085
 
-|v lineare| max nel corpo [m/s]:  x 0.33  y 0.57  z 0.50   (norma max 0.63)
-|ω| max nel corpo [rad/s]:       x 4.67  y 2.31  z 1.52
+|v lineare| max nel corpo [m/s]:  x 0.99  y 0.94  z 1.00   (norma max 1.29)
+|ω| max nel corpo [rad/s]:       x 5.26  y 0.68  z 1.79
 
 riferimenti di velocità comandati dalla rete di posizione (max in modulo, campo ±1, ±1, ±1 m/s e ±1.5 rad/s):
-  vx 0.46  vy 0.87  vz 0.71 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 0.0%  vy 0.0%  vz 0.0%  wz 7.6%
+  vx 1.00  vy 1.00  vz 0.93 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 9.6%  vy 13.1%  vz 0.0%  wz 12.4%
 
-passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  spinta 0.4%  Mx 0.0%  My 0.0%  Mz 0.0%
+passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  spinta 0.8%  Mx 0.0%  My 0.0%  Mz 0.0%

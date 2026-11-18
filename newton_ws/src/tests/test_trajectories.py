@@ -45,6 +45,8 @@ print(f"  frazione {frac:.3f} (atteso 0.5)", ok(abs(frac - 0.5) < 0.04, "frazion
 # ---------------------------------------------------------------------------------------------- 3
 print("3) Ogni tipo di curva: dentro i limiti, velocità analitica = derivata della posizione, velocità entro il limite")
 for name, kind in KIND_NAMES.items():
+    if name == "circuit":
+        continue  # attraversa lo spazio per costruzione: ha il suo test (3d)
     th = TargetHandler(512, dev, seed=2, traj_prob=1.0, traj_speed_range=(0.1, 0.5))
     th.set_trajectory(name)
     lo = torch.tensor([-1.5, -1.5, 0.5], device=dev)
@@ -175,6 +177,25 @@ for _ in range(600):
 print(f"  picco velocità {vmax:.3f} (<= 0.5), accelerazione {amax:.3f} (<= 0.5 + margine)", ok(vmax <= 0.5 + 1e-3 and amax <= 0.55, "limiti custom"))
 print("  nessun heading nelle custom", ok(not bool((th.tr["yaw_mode"] == 1).any()), "heading custom"))
 print("  finestra piena e finita", ok(bool(torch.isfinite(th.window()[0]).all()) and float(th.window()[0].abs().max()) > 0, "finestra custom"))
+
+# ---------------------------------------------------------------------------------------------- 3d
+print("3d) Circuiti (solo scelta a mano): percorso lungo, velocità e quota nei limiti, verso di marcia sempre definito")
+for flat in (1.0, 0.0):
+    th = TargetHandler(512, dev, seed=7)
+    th.circuit_duration = 22.0
+    th.set_trajectory("circuit", speed=0.4, flat_prob=flat)
+    pp, vv = [], []
+    for _ in range(int(22.0 / 0.04)):
+        pp.append(th.target_pos.clone())
+        vv.append(th.target_vel.clone())
+        th.step()
+    pp, vv = torch.stack(pp), torch.stack(vv)
+    dist = (pp[-1] - pp[0]).norm(dim=-1)
+    ok_v = float(vv.norm(dim=-1).max()) <= 0.4 + 1e-3
+    ok_z = bool((pp[..., 2] >= 0.5 - 1e-3).all() and (pp[..., 2] <= 1.5 + 1e-3).all())
+    ok_h = float(vv[..., :2].norm(dim=-1).min()) > 0.05 if flat == 1.0 else True
+    print(f"  flat={flat:.0f}: distanza inizio-fine media {float(dist.mean()):.1f} m (min {float(dist.min()):.1f}), z in [{float(pp[...,2].min()):.2f}, {float(pp[...,2].max()):.2f}]",
+          ok(ok_v and ok_z and float(dist.min()) > 1.5 and ok_h and bool(torch.isfinite(pp).all()), f"circuito flat={flat}"))
 
 # ---------------------------------------------------------------------------------------------- 9
 print("9) Cascata: finestra di training con traiettorie, gradiente finito, nessun NaN")

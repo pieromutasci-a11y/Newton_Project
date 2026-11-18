@@ -184,6 +184,9 @@ Come in Isaac Lab (`wp_preview_horizon`), la rete vede una **finestra** sul rife
   Ampiezza totale 0.3-0.9 m su x e y, 0-0.4 m su z (ridotta se esce dal campo). Le frequenze sono scalate in modo che il picco della norma della velocità
   (controllato numericamente su 25 s) sia al più quello campionato in 0.1-0.5 m/s, e l'accelerazione resti sotto 0.5 m/s² (maggiorante).
   Yaw: fisso o in rotazione lenta (mai nel verso di marcia: la velocità orizzontale può annullarsi). Le curve standard sono il caso di una sola armonica.
+- **Circuiti (solo valutazione, `--traj circuit`):** percorso lungo che avanza nello spazio come un tracciato: avanzamento costante nel mondo (65% del picco di velocità, direzione
+  casuale sul piano orizzontale, con `--orient 3d` anche una lieve salita o discesa) più ondulazioni custom più ampie (35%). Attraversa circa 5 m in 20 s e la quota resta nel campo
+  (0.5-1.5 m) per tutta la durata della prova. Lo yaw può seguire il verso di marcia (la velocità orizzontale non si annulla mai). Non è nel mix di training.
 - **Mix per episodio:** `--traj_prob` (default 0.5): ogni episodio, a ogni reset, è una traiettoria con questa probabilità, altrimenti una coda di 3 waypoint.
   Tra le traiettorie, `--custom_prob` (default 0.5) è la quota di curve custom. Con i default: 50% waypoint, 25% curve standard (5% ciascuna), 25% custom.
   Metriche: `metric/custom_frac`, `metric/dist_custom_m` (nel log `custom`).
@@ -210,7 +213,7 @@ docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/
 # idem, riferimento fisso scelto a mano (assi non indicati = 0; --duration, default 10 s)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> --vx 0.5 --vy -0.3 [--vz 0.2] [--wz 1.0] [--duration 10]
 
-# valutazione con traiettoria continua (tipo: line, circle, ellipse, eight, helix, custom; --speed = picco di velocità in m/s; --duration default 20 s)
+# valutazione con traiettoria continua (tipo: line, circle, ellipse, eight, helix, custom, circuit; --speed = picco di velocità in m/s; --duration default 20 s)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4 [--orient flat|3d]   # `random` = tipo standard casuale; dimensioni casuali; flat = piano xy (default), 3d = orientamento casuale
 
 # valutazione della posizione con GUI (5 riferimenti casuali, poi chiude; salva 3 grafici e il riepilogo in data/pos_controller/results/<nome>/)

@@ -21,9 +21,9 @@ import math
 import torch
 
 # Tipi di traiettoria
-LINE, CIRCLE, ELLIPSE, EIGHT, HELIX, CUSTOM = range(6)
-KIND_NAMES = {"line": LINE, "circle": CIRCLE, "ellipse": ELLIPSE, "eight": EIGHT, "helix": HELIX, "custom": CUSTOM}
-N_STANDARD = 5  # i primi 5 tipi sono le curve standard; CUSTOM è la famiglia casuale
+LINE, CIRCLE, ELLIPSE, EIGHT, HELIX, CUSTOM, CIRCUIT = range(7)
+KIND_NAMES = {"line": LINE, "circle": CIRCLE, "ellipse": ELLIPSE, "eight": EIGHT, "helix": HELIX, "custom": CUSTOM, "circuit": CIRCUIT}
+N_STANDARD = 5  # i primi 5 tipi sono le curve standard; CUSTOM è la famiglia casuale; CIRCUIT (solo scelta a mano) è un percorso lungo
 N_HARM = 3  # armoniche per asse (le curve standard ne usano una sola)
 SPEED_HORIZON = 25.0  # s, intervallo su cui si controlla il picco di velocità delle curve custom
 
@@ -62,6 +62,7 @@ class TargetHandler:
         self.traj_flat_prob = traj_flat_prob
         self.custom_prob = custom_prob
         self.custom_max_acc = custom_max_acc
+        self.circuit_duration = 20.0  # s, durata su cui un circuito deve restare nei limiti di z e attraversare lo spazio
         self.dt = dt
         self.window_points = window_points
         self.window_dt = window_dt
@@ -82,6 +83,7 @@ class TargetHandler:
         self.tr = {
             "kind": torch.zeros(num_worlds, dtype=torch.long, device=device),
             "center": z(num_worlds, 3),
+            "drift": z(num_worlds, 3),  # velocità di avanzamento costante nel sistema del mondo (circuiti), altrimenti 0
             "amp": z(num_worlds, 3, N_HARM),  # ampiezza, frequenza e fase di ogni armonica di ogni asse locale
             "omega": z(num_worlds, 3, N_HARM),
             "phase": z(num_worlds, 3, N_HARM),
@@ -158,7 +160,8 @@ class TargetHandler:
         zero, one = torch.zeros_like(psi), torch.ones_like(psi)
         rot_flat = torch.stack([cp, -sp, zero, sp, cp, zero, zero, zero, one], dim=-1).reshape(k, 3, 3)
         flat_prob = self.traj_flat_prob if flat_prob is None else flat_prob
-        rot = torch.where((u(0.0, 1.0, (k,)) < flat_prob)[:, None, None], rot_flat, rot)
+        flat_mask = u(0.0, 1.0, (k,)) < flat_prob
+        rot = torch.where(flat_mask[:, None, None], rot_flat, rot)
 
         # Estensione della curva lungo x, y, z del mondo: sta in una scatola di semi-lati sum_j |R_ij| a_j.
         # Se supera il campo (z: metà del campo; xy: bordo meno un margine) si riducono le ampiezze.
@@ -189,27 +192,51 @@ class TargetHandler:
         # Le curve standard usano la sola prima armonica; le CUSTOM hanno N_HARM armoniche per asse
         pad = lambda a: torch.cat([a[..., None], torch.zeros(k, 3, N_HARM - 1, device=self.device)], dim=-1)  # noqa: E731
         amp, omega, phase = pad(amp), pad(omega), pad(phase)
-        is_custom = kind == CUSTOM
-        if bool(is_custom.any()):
-            camp, comega, cphase, cext = self._sample_custom(k, rot, speed)
-            m = is_custom[:, None, None]
+        is_custom, is_circuit = kind == CUSTOM, kind == CIRCUIT
+        drift = torch.zeros(k, 3, device=self.device)
+        dz_tot = torch.zeros(k, device=self.device)
+        if bool((is_custom | is_circuit).any()):
+            # Circuito: avanzamento costante `drift` (65% della velocità) più ondulazioni custom più ampie (35%);
+            # la variazione totale di quota |dz_tot| su circuit_duration è limitata (la z deve restare nel campo)
+            T = self.circuit_duration
+            width = self.z_range[1] - self.z_range[0]
+            dz_tot = torch.where(is_circuit & ~flat_mask, u(-0.5, 0.5, (k,)), torch.zeros_like(speed))
+            sd = 0.65 * speed
+            vz = (dz_tot / T).clamp(-0.5 * sd, 0.5 * sd)
+            dz_tot = vz * T
+            az_ = u(0.0, two_pi, (k,))
+            vh = (sd**2 - vz**2).clamp(min=0.0).sqrt()
+            drift = torch.where(is_circuit[:, None], torch.stack([vh * torch.cos(az_), vh * torch.sin(az_), vz], dim=-1), drift)
+            half_z_rows = torch.where(is_circuit, 0.5 * (width - dz_tot.abs()), torch.full_like(speed, half_z))
+            half_xy_rows = torch.where(is_circuit, torch.full_like(speed, 1e3), torch.full_like(speed, half_xy))
+            camp, comega, cphase, cext = self._sample_custom(k, rot, torch.where(is_circuit, 0.35 * speed, speed), is_circuit, half_xy_rows, half_z_rows)
+            use = is_custom | is_circuit
+            m = use[:, None, None]
             amp, omega, phase = torch.where(m, camp, amp), torch.where(m, comega, omega), torch.where(m, cphase, phase)
-            ext = torch.where(is_custom[:, None], cext, ext)
+            ext = torch.where(use[:, None], cext, ext)
 
         lo = torch.tensor([self.xy_range[0], self.xy_range[0], self.z_range[0]], device=self.device)
         hi = torch.tensor([self.xy_range[1], self.xy_range[1], self.z_range[1]], device=self.device)
         center = lo + ext + u(0.0, 1.0, (k, 3)) * (hi - lo - 2.0 * ext).clamp(min=0.0)
+        if bool(is_circuit.any()):
+            # Circuito centrato nell'origine in x, y (l'avanzamento lo porta da un lato all'altro); z dentro il campo
+            T, width = self.circuit_duration, self.z_range[1] - self.z_range[0]
+            cxy = -0.5 * drift[:, :2] * T + u(-0.3, 0.3, (k, 2))
+            room = (width - dz_tot.abs() - 2.0 * ext[:, 2]).clamp(min=0.0)
+            cz = self.z_range[0] + ext[:, 2] + (-dz_tot).clamp(min=0.0) + u(0.0, 1.0, (k,)) * room
+            center = torch.where(is_circuit[:, None], torch.cat([cxy, cz[:, None]], dim=-1), center)
 
         # Yaw: fisso, nel verso di marcia (solo se la velocità orizzontale non si annulla: non per la retta, né se il
         # piano della curva è molto inclinato, cioè asse locale z a più di 25° dalla verticale) o in rotazione lenta
         draw = u(0.0, 1.0, (k,))
         yaw_mode = torch.where(draw < 0.35, torch.ones_like(kind), torch.where(draw < 0.65, 2 * torch.ones_like(kind), torch.zeros_like(kind)))
         flat = rot[:, 2, 2].abs() > math.cos(math.radians(25.0))
-        yaw_mode = torch.where((yaw_mode == 1) & (is_line | ~flat | is_custom), torch.zeros_like(yaw_mode), yaw_mode)
+        yaw_mode = torch.where((yaw_mode == 1) & (is_line | (~flat & ~is_circuit) | is_custom), torch.zeros_like(yaw_mode), yaw_mode)
         yaw_rate = torch.where(torch.rand(k, device=self.device, generator=self._gen) < 0.5, -1.0, 1.0) * u(0.1, 0.4, (k,))
         return {
             "kind": kind,
             "center": center,
+            "drift": drift,
             "amp": amp,
             "omega": omega,
             "phase": phase,
@@ -221,12 +248,12 @@ class TargetHandler:
 
     def _custom_vmax(self, amp, omega, phase) -> torch.Tensor:
         """Picco della norma della velocità (k,) su [0, SPEED_HORIZON] (la rotazione non cambia la norma)."""
-        t = torch.arange(0.0, SPEED_HORIZON, 0.05, device=self.device)[None, :, None, None]
+        t = torch.arange(0.0, max(SPEED_HORIZON, self.circuit_duration), 0.05, device=self.device)[None, :, None, None]
         v = (amp[:, None] * omega[:, None] * torch.cos(omega[:, None] * t + phase[:, None])).sum(-1)  # (k, M, 3)
         return v.norm(dim=-1).amax(dim=1)
 
     @torch.no_grad()
-    def _sample_custom(self, k: int, rot: torch.Tensor, speed: torch.Tensor):
+    def _sample_custom(self, k: int, rot: torch.Tensor, speed: torch.Tensor, is_circ=None, half_xy=None, half_z=None):
         """Curve CUSTOM: ogni asse locale è una somma di N_HARM sinusoidi con ampiezza, frequenza e fase casuali
 
             l_i(t) = sum_h a_ih sin(w_ih t + p_ih),    p = c + R l
@@ -237,12 +264,15 @@ class TargetHandler:
         entro custom_max_acc. Restituisce amp, omega, phase (k, 3, N_HARM) ed ext (k, 3) (estensione lungo gli assi mondo)."""
         u = self._uniform
         w = u(0.2, 1.0, (k, 3, N_HARM))
-        tot = torch.stack([u(0.3, 0.9, (k,)), u(0.3, 0.9, (k,)), u(0.0, 0.4, (k,))], dim=-1)
+        is_circ = torch.zeros(k, dtype=torch.bool, device=self.device) if is_circ is None else is_circ
+        lo_a, hi_a = torch.where(is_circ, 0.5, 0.3), torch.where(is_circ, 1.5, 0.9)  # ampiezze xy: più ampie nei circuiti
+        tot = torch.stack([lo_a + (hi_a - lo_a) * u(0.0, 1.0, (k,)), lo_a + (hi_a - lo_a) * u(0.0, 1.0, (k,)), u(0.0, 0.4, (k,))], dim=-1)
         amp = tot[..., None] * w / w.sum(-1, keepdim=True)
         f = u(0.3, 1.5, (k, 3, N_HARM))
         phase = u(0.0, 2.0 * math.pi, (k, 3, N_HARM))
 
-        half_xy, half_z = self.xy_range[1] - 0.1, 0.5 * (self.z_range[1] - self.z_range[0])
+        half_xy = self.xy_range[1] - 0.1 if half_xy is None else half_xy
+        half_z = 0.5 * (self.z_range[1] - self.z_range[0]) if half_z is None else half_z
         ext = (rot.abs() * tot[:, None, :]).sum(dim=-1)
         shrink = torch.minimum(torch.ones_like(speed), torch.minimum(half_z / ext[:, 2].clamp(min=1e-6), half_xy / ext[:, :2].amax(dim=-1).clamp(min=1e-6)))
         amp, ext = amp * shrink[:, None, None], ext * shrink[:, None]
@@ -264,8 +294,8 @@ class TargetHandler:
         p = self.tr
         th = p["omega"] * t[:, None, None] + p["phase"]
         s, c = torch.sin(th), torch.cos(th)
-        pos = p["center"] + torch.einsum("nij,nj->ni", p["rot"], (p["amp"] * s).sum(-1))
-        vel = torch.einsum("nij,nj->ni", p["rot"], (p["amp"] * p["omega"] * c).sum(-1))
+        pos = p["center"] + p["drift"] * t[:, None] + torch.einsum("nij,nj->ni", p["rot"], (p["amp"] * s).sum(-1))
+        vel = p["drift"] + torch.einsum("nij,nj->ni", p["rot"], (p["amp"] * p["omega"] * c).sum(-1))
         heading = torch.atan2(vel[:, 1], vel[:, 0])
         yaw = torch.where(
             p["yaw_mode"] == 1, heading, torch.where(p["yaw_mode"] == 2, _wrap_to_pi(p["yaw0"] + p["yaw_rate"] * t), p["yaw0"])
