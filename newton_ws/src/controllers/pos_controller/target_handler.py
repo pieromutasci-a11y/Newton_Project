@@ -21,8 +21,11 @@ import math
 import torch
 
 # Tipi di traiettoria
-LINE, CIRCLE, ELLIPSE, EIGHT, HELIX = range(5)
-KIND_NAMES = {"line": LINE, "circle": CIRCLE, "ellipse": ELLIPSE, "eight": EIGHT, "helix": HELIX}
+LINE, CIRCLE, ELLIPSE, EIGHT, HELIX, CUSTOM = range(6)
+KIND_NAMES = {"line": LINE, "circle": CIRCLE, "ellipse": ELLIPSE, "eight": EIGHT, "helix": HELIX, "custom": CUSTOM}
+N_STANDARD = 5  # i primi 5 tipi sono le curve standard; CUSTOM è la famiglia casuale
+N_HARM = 3  # armoniche per asse (le curve standard ne usano una sola)
+SPEED_HORIZON = 25.0  # s, intervallo su cui si controlla il picco di velocità delle curve custom
 
 
 def _wrap_to_pi(a: torch.Tensor) -> torch.Tensor:
@@ -42,6 +45,8 @@ class TargetHandler:
         traj_prob: float = 0.0,  # probabilità che un episodio sia una traiettoria (0: solo waypoint, come prima)
         traj_speed_range: tuple[float, float] = (0.1, 0.5),  # m/s, picco della velocità della curva
         traj_flat_prob: float = 0.3,  # frazione di curve sul piano orizzontale (solo ruotate attorno a z); le altre hanno orientamento 3D
+        custom_prob: float = 0.5,  # tra le traiettorie, quota di curve CUSTOM (somme di sinusoidi casuali)
+        custom_max_acc: float = 0.5,  # m/s^2, limite di accelerazione delle curve custom
         dt: float = 0.04,  # s, passo di controllo della rete di posizione (avanza il tempo delle traiettorie)
         window_points: int = 4,  # punti della finestra: l'attuale + (window_points - 1) futuri
         window_dt: float = 0.5,  # s tra due punti consecutivi della finestra
@@ -55,6 +60,8 @@ class TargetHandler:
         self.traj_prob = traj_prob
         self.traj_speed_range = traj_speed_range
         self.traj_flat_prob = traj_flat_prob
+        self.custom_prob = custom_prob
+        self.custom_max_acc = custom_max_acc
         self.dt = dt
         self.window_points = window_points
         self.window_dt = window_dt
@@ -75,9 +82,9 @@ class TargetHandler:
         self.tr = {
             "kind": torch.zeros(num_worlds, dtype=torch.long, device=device),
             "center": z(num_worlds, 3),
-            "amp": z(num_worlds, 3),
-            "omega": z(num_worlds, 3),
-            "phase": z(num_worlds, 3),
+            "amp": z(num_worlds, 3, N_HARM),  # ampiezza, frequenza e fase di ogni armonica di ogni asse locale
+            "omega": z(num_worlds, 3, N_HARM),
+            "phase": z(num_worlds, 3, N_HARM),
             "rot": torch.eye(3, device=device).repeat(num_worlds, 1, 1),  # orientamento 3D della curva (matrice di rotazione)
             "yaw_mode": torch.zeros(num_worlds, dtype=torch.long, device=device),  # 0 fisso, 1 nel verso di marcia, 2 ruota
             "yaw0": z(num_worlds),
@@ -107,7 +114,7 @@ class TargetHandler:
         return low + (high - low) * torch.rand(shape, device=self.device, generator=self._gen)
 
     # ------------------------------------------------------------------ curve
-    def _sample_traj(self, k: int, kind=None, speed_range=None, flat_prob=None) -> dict:
+    def _sample_traj(self, k: int, kind=None, speed_range=None, flat_prob=None, custom_prob=None) -> dict:
         """Parametri di `k` traiettorie. Curva nel sistema locale, poi ruotata da una rotazione 3D casuale R e traslata
         nel centro c (il piano della curva può avere qualunque orientamento nello spazio):
 
@@ -121,7 +128,9 @@ class TargetHandler:
         u = self._uniform
         two_pi = 2.0 * math.pi
         if kind is None:
-            kind = torch.randint(0, 5, (k,), device=self.device, generator=self._gen)
+            kind = torch.randint(0, N_STANDARD, (k,), device=self.device, generator=self._gen)
+            cp_ = self.custom_prob if custom_prob is None else custom_prob
+            kind = torch.where(u(0.0, 1.0, (k,)) < cp_, torch.full_like(kind, CUSTOM), kind)
         else:
             kind = torch.as_tensor(kind, device=self.device).expand(k).clone()
         is_line, is_eight, is_helix = kind == LINE, kind == EIGHT, kind == HELIX
@@ -177,6 +186,16 @@ class TargetHandler:
         py = torch.where(is_eight, 2.0 * px, px + math.pi / 2)
         phase = torch.stack([px, py, u(0.0, two_pi, (k,))], dim=-1)
 
+        # Le curve standard usano la sola prima armonica; le CUSTOM hanno N_HARM armoniche per asse
+        pad = lambda a: torch.cat([a[..., None], torch.zeros(k, 3, N_HARM - 1, device=self.device)], dim=-1)  # noqa: E731
+        amp, omega, phase = pad(amp), pad(omega), pad(phase)
+        is_custom = kind == CUSTOM
+        if bool(is_custom.any()):
+            camp, comega, cphase, cext = self._sample_custom(k, rot, speed)
+            m = is_custom[:, None, None]
+            amp, omega, phase = torch.where(m, camp, amp), torch.where(m, comega, omega), torch.where(m, cphase, phase)
+            ext = torch.where(is_custom[:, None], cext, ext)
+
         lo = torch.tensor([self.xy_range[0], self.xy_range[0], self.z_range[0]], device=self.device)
         hi = torch.tensor([self.xy_range[1], self.xy_range[1], self.z_range[1]], device=self.device)
         center = lo + ext + u(0.0, 1.0, (k, 3)) * (hi - lo - 2.0 * ext).clamp(min=0.0)
@@ -186,7 +205,7 @@ class TargetHandler:
         draw = u(0.0, 1.0, (k,))
         yaw_mode = torch.where(draw < 0.35, torch.ones_like(kind), torch.where(draw < 0.65, 2 * torch.ones_like(kind), torch.zeros_like(kind)))
         flat = rot[:, 2, 2].abs() > math.cos(math.radians(25.0))
-        yaw_mode = torch.where((yaw_mode == 1) & (is_line | ~flat), torch.zeros_like(yaw_mode), yaw_mode)
+        yaw_mode = torch.where((yaw_mode == 1) & (is_line | ~flat | is_custom), torch.zeros_like(yaw_mode), yaw_mode)
         yaw_rate = torch.where(torch.rand(k, device=self.device, generator=self._gen) < 0.5, -1.0, 1.0) * u(0.1, 0.4, (k,))
         return {
             "kind": kind,
@@ -200,14 +219,53 @@ class TargetHandler:
             "yaw_rate": yaw_rate,
         }
 
+    def _custom_vmax(self, amp, omega, phase) -> torch.Tensor:
+        """Picco della norma della velocità (k,) su [0, SPEED_HORIZON] (la rotazione non cambia la norma)."""
+        t = torch.arange(0.0, SPEED_HORIZON, 0.05, device=self.device)[None, :, None, None]
+        v = (amp[:, None] * omega[:, None] * torch.cos(omega[:, None] * t + phase[:, None])).sum(-1)  # (k, M, 3)
+        return v.norm(dim=-1).amax(dim=1)
+
+    @torch.no_grad()
+    def _sample_custom(self, k: int, rot: torch.Tensor, speed: torch.Tensor):
+        """Curve CUSTOM: ogni asse locale è una somma di N_HARM sinusoidi con ampiezza, frequenza e fase casuali
+
+            l_i(t) = sum_h a_ih sin(w_ih t + p_ih),    p = c + R l
+
+        Ampiezza totale per asse A_x, A_y in 0.3-0.9 m, A_z in 0-0.4 m (ridotta se la curva esce dal campo);
+        frequenze relative 0.3-1.5 (poi scalate). La scala delle frequenze è scelta in modo che il picco della norma della
+        velocità, controllato numericamente su SPEED_HORIZON, sia `speed` (mai oltre), e l'accelerazione resti
+        entro custom_max_acc. Restituisce amp, omega, phase (k, 3, N_HARM) ed ext (k, 3) (estensione lungo gli assi mondo)."""
+        u = self._uniform
+        w = u(0.2, 1.0, (k, 3, N_HARM))
+        tot = torch.stack([u(0.3, 0.9, (k,)), u(0.3, 0.9, (k,)), u(0.0, 0.4, (k,))], dim=-1)
+        amp = tot[..., None] * w / w.sum(-1, keepdim=True)
+        f = u(0.3, 1.5, (k, 3, N_HARM))
+        phase = u(0.0, 2.0 * math.pi, (k, 3, N_HARM))
+
+        half_xy, half_z = self.xy_range[1] - 0.1, 0.5 * (self.z_range[1] - self.z_range[0])
+        ext = (rot.abs() * tot[:, None, :]).sum(dim=-1)
+        shrink = torch.minimum(torch.ones_like(speed), torch.minimum(half_z / ext[:, 2].clamp(min=1e-6), half_xy / ext[:, :2].amax(dim=-1).clamp(min=1e-6)))
+        amp, ext = amp * shrink[:, None, None], ext * shrink[:, None]
+
+        # Scala delle frequenze: parte da un maggiorante della velocità (garantisce <= speed), poi si avvicina al
+        # picco vero (2 correzioni verso l'alto) e infine si riduce se il controllo numerico supera `speed`.
+        bound = (amp * f).sum(-1).norm(dim=-1)
+        base = speed / bound.clamp(min=1e-6)
+        for _ in range(2):
+            base = base * (speed / self._custom_vmax(amp, f * base[:, None, None], phase).clamp(min=1e-6)).clamp(max=3.0)
+        base = base * (speed / self._custom_vmax(amp, f * base[:, None, None], phase).clamp(min=1e-6)).clamp(max=1.0)
+        acc = (amp * f**2).sum(-1).norm(dim=-1) * base**2  # maggiorante dell'accelerazione
+        base = base * torch.clamp(self.custom_max_acc / acc.clamp(min=1e-6), max=1.0).sqrt()
+        return amp, f * base[:, None, None], phase, ext
+
     @torch.no_grad()
     def _curve(self, t: torch.Tensor):
         """Posizione (N,3), velocità (N,3) e yaw (N,) della curva di ogni mondo all'istante t (N,)."""
         p = self.tr
-        th = p["omega"] * t[:, None] + p["phase"]
+        th = p["omega"] * t[:, None, None] + p["phase"]
         s, c = torch.sin(th), torch.cos(th)
-        pos = p["center"] + torch.einsum("nij,nj->ni", p["rot"], p["amp"] * s)
-        vel = torch.einsum("nij,nj->ni", p["rot"], p["amp"] * p["omega"] * c)
+        pos = p["center"] + torch.einsum("nij,nj->ni", p["rot"], (p["amp"] * s).sum(-1))
+        vel = torch.einsum("nij,nj->ni", p["rot"], (p["amp"] * p["omega"] * c).sum(-1))
         heading = torch.atan2(vel[:, 1], vel[:, 0])
         yaw = torch.where(
             p["yaw_mode"] == 1, heading, torch.where(p["yaw_mode"] == 2, _wrap_to_pi(p["yaw0"] + p["yaw_rate"] * t), p["yaw0"])
@@ -279,7 +337,7 @@ class TargetHandler:
         Valutazione con traiettoria scelta a mano."""
         kind = None if kind == "random" else (KIND_NAMES[kind] if isinstance(kind, str) else int(kind))  # None: tipo casuale per mondo
         ids = torch.arange(self.n, device=self.device)
-        params = self._sample_traj(self.n, kind=kind, speed_range=None if speed is None else (speed, speed), flat_prob=flat_prob)
+        params = self._sample_traj(self.n, kind=kind, speed_range=None if speed is None else (speed, speed), flat_prob=flat_prob, custom_prob=0.0)
         self._set_traj(ids, torch.ones(self.n, dtype=torch.bool, device=self.device), params)
         self._refresh()
         self.step_target_pos, self.step_target_yaw, self.step_target_vel = self.target_pos, self.target_yaw, self.target_vel

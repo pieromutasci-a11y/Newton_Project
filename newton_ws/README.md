@@ -179,7 +179,14 @@ Come in Isaac Lab (`wp_preview_horizon`), la rete vede una **finestra** sul rife
   Picco di velocità in 0.1-0.5 m/s (`--traj_speed_min/max`), dentro il campo dei waypoint (x, y ±1.5 m, z 0.5-1.5 m: se l'orientamento non ci sta, si riducono le ampiezze).
   Yaw: fisso, nel verso di marcia (solo per curve con piano quasi orizzontale, entro 25° dalla verticale; non per la retta) o in rotazione lenta (0.1-0.4 rad/s). Il riferimento scorre da solo: nessun avanzamento per raggiungimento, episodio da 15 s;
   il drone parte fermo entro 0.3 m dal punto iniziale.
+- **Curve custom:** oltre alle 5 standard, una famiglia casuale: ogni asse locale è una **somma di 3 sinusoidi** con ampiezza, frequenza e fase casuali
+  (`l_i(t) = Σ_h a_ih sin(w_ih t + p_ih)`), poi ruotata in 3D come le altre (30% orizzontali / 70% 3D). Curvatura e velocità variano lungo il percorso.
+  Ampiezza totale 0.3-0.9 m su x e y, 0-0.4 m su z (ridotta se esce dal campo). Le frequenze sono scalate in modo che il picco della norma della velocità
+  (controllato numericamente su 25 s) sia al più quello campionato in 0.1-0.5 m/s, e l'accelerazione resti sotto 0.5 m/s² (maggiorante).
+  Yaw: fisso o in rotazione lenta (mai nel verso di marcia: la velocità orizzontale può annullarsi). Le curve standard sono il caso di una sola armonica.
 - **Mix per episodio:** `--traj_prob` (default 0.5): ogni episodio, a ogni reset, è una traiettoria con questa probabilità, altrimenti una coda di 3 waypoint.
+  Tra le traiettorie, `--custom_prob` (default 0.5) è la quota di curve custom. Con i default: 50% waypoint, 25% curve standard (5% ciascuna), 25% custom.
+  Metriche: `metric/custom_frac`, `metric/dist_custom_m` (nel log `custom`).
 - **Costo:** nel termine `lin_vel` e nella frenata si usa la velocità **relativa** a quella del riferimento (per i waypoint è 0, quindi identico a prima).
 - **Costo di calcolo:** circa 300 ms per iterazione con 4096 mondi (anche con `--traj_prob 0`: il peso è nelle piccole operazioni sul riferimento e nella cascata).
 - **Non ancora fatto:** training vero, curriculum sulla velocità, anteprima anche sui waypoint con attenuazione vicino al bersaglio (`preview_attenuazione_dist` di Isaac Lab).
@@ -193,7 +200,7 @@ docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train
   --log_interval 50 --ckpt_interval 200 --run_name <nome>
 
 # training del controllore di posizione sopra la rete di velocità congelata (salva in data/pos_controller/)
-# --traj_prob: frazione di episodi con traiettoria continua (default 0.5; 0 = solo waypoint); --traj_speed_min/max: picco di velocità [m/s]
+# --traj_prob: frazione di episodi con traiettoria continua (default 0.5; 0 = solo waypoint); --custom_prob: quota di curve custom tra le traiettorie (default 0.5); --traj_speed_min/max: picco di velocità [m/s]
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/train/train_APG_pos_controller.py \
   --vel_run apg_vel_v7 [--vel_ckpt best|last] [--traj_prob 0.5] --num_envs 4096 --horizon 32 --iterations 3000 --lr 1e-3 --grad_clip 1.0 \
   --log_interval 50 --ckpt_interval 200 --run_name <nome>
@@ -203,8 +210,8 @@ docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/
 # idem, riferimento fisso scelto a mano (assi non indicati = 0; --duration, default 10 s)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_vel_controller_policy.py --run <nome> --vx 0.5 --vy -0.3 [--vz 0.2] [--wz 1.0] [--duration 10]
 
-# valutazione con traiettoria continua (tipo: line, circle, ellipse, eight, helix; --speed = picco di velocità in m/s; --duration default 20 s)
-docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4 [--orient flat|3d]   # tipo anche `random`; dimensioni casuali; flat = piano xy (default), 3d = orientamento casuale
+# valutazione con traiettoria continua (tipo: line, circle, ellipse, eight, helix, custom; --speed = picco di velocità in m/s; --duration default 20 s)
+docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> --traj circle --speed 0.4 [--orient flat|3d]   # `random` = tipo standard casuale; dimensioni casuali; flat = piano xy (default), 3d = orientamento casuale
 
 # valutazione della posizione con GUI (5 riferimenti casuali, poi chiude; salva 3 grafici e il riepilogo in data/pos_controller/results/<nome>/)
 docker exec -it newton-lab-Mutasci python /workspace/project_workspace/src/eval/eval_pos_controller_policy.py --run <nome> [--ckpt last] [--n_waypoints 5] [--seed N]

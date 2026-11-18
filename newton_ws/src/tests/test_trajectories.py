@@ -152,6 +152,30 @@ _, terms2 = cost_function(e, a, a, hover, w)
 print("  lin_vel nullo se v = v_rif:", ok(float(terms2["lin_vel"].abs().max()) < 1e-9, "lin_vel"))
 print("  waypoint: invariato (v_rif = 0)", ok(bool(torch.allclose(terms["lin_vel"][~traj], torch.zeros_like(terms["lin_vel"][~traj]) + terms["lin_vel"][~traj])), "wp invariato"))
 
+# ---------------------------------------------------------------------------------------------- 3c
+print("3c) Curve custom: accelerazione limitata, mix custom_prob, 'random' resta sulle curve standard, niente heading")
+from controllers.pos_controller.target_handler import CUSTOM  # noqa: E402
+
+th = TargetHandler(1024, dev, seed=5, traj_prob=1.0, custom_prob=0.5)
+th.sample(torch.arange(1024, device=dev))
+fc = float((th.tr["kind"] == CUSTOM).float().mean())
+print(f"  frazione custom {fc:.3f} (atteso 0.5)", ok(abs(fc - 0.5) < 0.06, "custom_prob"))
+th.set_trajectory("random")
+print("  'random' = solo curve standard", ok(not bool((th.tr["kind"] == CUSTOM).any()), "random senza custom"))
+th.set_trajectory("custom", speed=0.5)
+t = torch.zeros(1024, device=dev)
+_, v_prev, _ = th._curve(t)
+amax, vmax = 0.0, 0.0
+for _ in range(600):
+    t = t + 0.04
+    _, v, _ = th._curve(t)
+    amax = max(amax, float(((v - v_prev) / 0.04).norm(dim=-1).max()))
+    vmax = max(vmax, float(v.norm(dim=-1).max()))
+    v_prev = v
+print(f"  picco velocità {vmax:.3f} (<= 0.5), accelerazione {amax:.3f} (<= 0.5 + margine)", ok(vmax <= 0.5 + 1e-3 and amax <= 0.55, "limiti custom"))
+print("  nessun heading nelle custom", ok(not bool((th.tr["yaw_mode"] == 1).any()), "heading custom"))
+print("  finestra piena e finita", ok(bool(torch.isfinite(th.window()[0]).all()) and float(th.window()[0].abs().max()) > 0, "finestra custom"))
+
 # ---------------------------------------------------------------------------------------------- 9
 print("9) Cascata: finestra di training con traiettorie, gradiente finito, nessun NaN")
 policy.train()
