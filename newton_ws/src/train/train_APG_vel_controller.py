@@ -19,6 +19,7 @@ Output (cartella newton_ws/data/vel_controller):
 
 import argparse
 import dataclasses
+import math
 import os
 import sys
 import time
@@ -28,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 
+from controllers.noise import NoiseConfig
 from controllers.vel_controller.vel_controller_env import VelControllerEnv
 from controllers.vel_controller.vel_controller_mlp import VelControllerMLP
 from drone_model.params import DroneParams
@@ -57,6 +59,9 @@ def parse_args():
         "--cost", action="append", default=[], metavar="NOME=VALORE",
         help="sovrascrive un peso di CostWeights (ripetibile), es. --cost action_rate_end=0.03 --cost tilt=10",
     )
+    p.add_argument("--noise_att_deg", type=float, default=0.0, help="rumore bianco sull'assetto misurato, roll/pitch/yaw [gradi] (dev. standard)")
+    p.add_argument("--noise_lin_vel", type=float, default=0.0, help="rumore bianco sulla velocità lineare misurata [m/s]")
+    p.add_argument("--noise_ang_vel", type=float, default=0.0, help="rumore bianco sulla velocità angolare misurata [rad/s]")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log_interval", type=int, default=20, help="ogni quante iterazioni stampare e loggare")
     p.add_argument("--ckpt_interval", type=int, default=200, help="ogni quante iterazioni salvare i checkpoint")
@@ -91,7 +96,10 @@ def main():
     # --- Mondo, ambiente, rete, ottimizzatore ---
     params = DroneParams()
     world = TrainWorld(params, TrainWorldConfig(num_worlds=args.num_envs, horizon=args.horizon, decimation=DECIMATION))
-    env = VelControllerEnv(world, seed=args.seed, max_episode_s=args.episode_s)
+    env = VelControllerEnv(
+        world, seed=args.seed, max_episode_s=args.episode_s,
+        noise=NoiseConfig(att=math.radians(args.noise_att_deg), lin_vel=args.noise_lin_vel, ang_vel=args.noise_ang_vel),
+    )
     policy = VelControllerMLP().to(dev)
     assert policy.input_dim == env.obs_dim and policy.output_dim == env.action_dim, (
         f"mlp_config.yaml ({policy.input_dim} -> {policy.output_dim}) non coincide con "

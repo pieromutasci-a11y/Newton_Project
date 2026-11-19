@@ -116,6 +116,22 @@ loss.backward()
 gn = torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.requires_grad], 1.0)
 print(f"  loss {float(loss.detach()):.4f}, |grad| {float(gn):.4f}", ok(bool(torch.isfinite(loss) and torch.isfinite(gn) and gn > 0), "gradiente rumoroso"))
 
+print("6) Controllore di velocità con rumore: la rete legge velocità e assetto misurati, il resto no")
+from controllers.vel_controller.vel_controller_env import VelControllerEnv  # noqa: E402
+
+vw = TrainWorld(params, TrainWorldConfig(num_worlds=N, horizon=H, decimation=2))
+v0 = VelControllerEnv(vw, seed=5)
+o0 = v0.observations()
+print("  senza rumore due letture uguali", ok(torch.equal(o0, v0.observations()), "vel zero"))
+vn = VelControllerEnv(TrainWorld(params, TrainWorldConfig(num_worlds=N, horizon=H, decimation=2)), seed=5, noise=NoiseConfig(att=sa, lin_vel=sv, ang_vel=sw))
+on = vn.observations()
+d = (on - o0).abs()
+print(f"  velocità e assetto (colonne 0:9) rumorosi: scarto medio {float(d[:, :9].mean()):.4f}", ok(float(d[:, :9].mean()) > 1e-3, "vel obs rumore"))
+print("  azione precedente e riferimento (colonne 9:17) senza rumore", ok(float(d[:, 9:].max()) == 0.0, "vel obs puliti"))
+print(f"  velocità lineare: scarto RMS {float((on[:, :3] - o0[:, :3]).pow(2).mean().sqrt()):.4f} (atteso circa {sv})", ok(abs(float((on[:, :3] - o0[:, :3]).pow(2).mean().sqrt()) - sv) < 0.2 * sv, "vel obs rms"))
+e0_, en_ = v0.errors(), vn.errors()
+print("  errors() veri uguali con e senza rumore", ok(torch.equal(e0_.vel_err, en_.vel_err) and torch.equal(e0_.gravity_b, en_.gravity_b), "vel errors veri"))
+
 print()
 print("TUTTO OK" if not fails else f"FALLITI: {fails}")
 sys.exit(1 if fails else 0)

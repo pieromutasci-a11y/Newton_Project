@@ -34,7 +34,8 @@ import torch
 
 from scene.train_world import TrainWorld
 
-from ..math_utils import quat_mul, quat_rotate_inverse, yaw_from_quat  # noqa: F401 (riesportate: i test le importano da qui)
+from ..math_utils import quat_mul, quat_rotate_inverse, yaw_from_quat  # noqa: F401
+from ..noise import NoiseConfig, measure_state  # noqa: F401 (NoiseConfig riesportata: la usano train, eval e test) (riesportate: i test le importano da qui)
 from ..vel_controller.vel_controller_env import vel_observations
 from .target_handler import TargetHandler
 
@@ -53,23 +54,6 @@ class Errors:
     # (N, 3) velocità del riferimento nel sistema del corpo: nulla per i waypoint, quella della curva per le traiettorie.
     # None = nulla (il costo la tratta come zero).
     ref_vel_b: torch.Tensor | None = None
-
-
-@dataclass
-class NoiseConfig:
-    """Rumore bianco gaussiano sul FEEDBACK (stato misurato), indipendente a ogni lettura. Tutto a zero = misure esatte.
-
-    Si applica solo a ciò che la rete vede: il costo, le terminazioni e i grafici usano lo stato vero.
-    """
-
-    pos: float = 0.0  # m, deviazione standard sulla posizione (x, y, z)
-    att: float = 0.0  # rad, deviazione standard della rotazione d'assetto (roll, pitch e yaw, vettore di rotazione)
-    lin_vel: float = 0.0  # m/s, sulla velocità lineare (nel mondo; il rumore è isotropo)
-    ang_vel: float = 0.0  # rad/s, sulla velocità angolare
-    to_vel_net: bool = True  # se False la rete di velocità (congelata, addestrata senza rumore) legge lo stato vero
-
-    def any(self) -> bool:
-        return self.pos > 0 or self.att > 0 or self.lin_vel > 0 or self.ang_vel > 0
 
 
 class PosControllerEnv:
@@ -198,18 +182,8 @@ class PosControllerEnv:
 
     # ------------------------------------------------------------------ errori e osservazioni
     def _measure(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stato MISURATO (q (N,7), qd (N,6)): quello vero più rumore bianco (NoiseConfig). Una nuova estrazione a ogni
-        chiamata. Il rumore è additivo (il gradiente passa invariato); sull'assetto è una piccola rotazione casuale."""
-        q, qd, nz = self.world.q, self.world.qd, self.noise
-        if not nz.any():
-            return q, qd
-        randn = lambda: torch.randn(self.n, 3, device=self.device, generator=self._gen_noise)  # noqa: E731
-        pos, quat = q[:, :3] + nz.pos * randn(), q[:, 3:7]
-        if nz.att > 0:
-            dq = torch.cat([0.5 * nz.att * randn(), torch.ones(self.n, 1, device=self.device)], dim=-1)
-            quat = quat_mul(quat, dq / dq.norm(dim=-1, keepdim=True))
-        lin, ang = qd[:, :3] + nz.lin_vel * randn(), qd[:, 3:6] + nz.ang_vel * randn()
-        return torch.cat([pos, quat], dim=-1), torch.cat([lin, ang], dim=-1)
+        """Stato MISURATO (q (N,7), qd (N,6)): quello vero più rumore bianco (NoiseConfig), nuova estrazione a ogni chiamata."""
+        return measure_state(self.world.q, self.world.qd, self.noise, self._gen_noise)
 
     def _compute_errors(self, target_pos: torch.Tensor, target_yaw: torch.Tensor, target_vel: torch.Tensor, measured=None) -> Errors:
         q, qd = measured if measured is not None else (self.world.q, self.world.qd)

@@ -211,6 +211,11 @@ senza rumore l'errore dopo 4 s è 0.7-4 mm; con 1 cm di rumore sulla posizione o
 con tutto insieme (1 cm, 0.5°, 0.05 m/s, 0.05 rad/s) la policy diverge (errore medio >10 m). Rumore d'assetto di 0.5° e angolare di 0.05 rad/s sono invece tollerati.
 La policy addestrata senza rumore ha quindi un guadagno molto alto sulla posizione e sulla velocità: serve addestrarla con il rumore.
 
+**Rumore anche nella rete di velocità (ramo `rumore-velocita`).** `NoiseConfig` sta ora in `controllers/noise.py`, condiviso dai due ambienti. L'ambiente di velocità
+legge lo stato misurato: velocità lineare e angolare e assetto (gravità proiettata) con rumore; l'azione precedente e il riferimento no; il costo usa lo stato vero.
+Argomenti in `train_APG_vel_controller.py` ed `eval_vel_controller_policy.py`: `--noise_att_deg`, `--noise_lin_vel`, `--noise_ang_vel` (la posizione non è un suo ingresso).
+Una rete di velocità addestrata con rumore cambia la dinamica dell'anello interno: la rete di posizione va riaddestrata sopra di essa (`--vel_run <nuova>`).
+
 ## 5. Comandi
 
 ```bash

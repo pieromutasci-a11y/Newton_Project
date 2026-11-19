@@ -31,6 +31,7 @@ import torch
 from scene.train_world import TrainWorld
 
 from ..math_utils import quat_rotate_inverse
+from ..noise import NoiseConfig, measure_state
 from .ref_handler import RefHandler
 
 
@@ -86,6 +87,7 @@ class VelControllerEnv:
         max_episode_s: float = 10.0,  # durata massima di un episodio, come in Isaac Lab (episode_length_s)
         max_distance: float = 20.0,  # m, oltre questa distanza dall'origine il drone è perso e si resetta
         max_ang_vel: float = 30.0,  # rad/s, oltre questa velocità angolare il drone sta per divergere: reset
+        noise: NoiseConfig | None = None,  # rumore sul feedback letto dalla rete (default: nessuno); il costo usa lo stato vero
     ):
         self.world = world
         self.n = world.cfg.num_worlds
@@ -105,6 +107,9 @@ class VelControllerEnv:
         # Generatore casuale (seme diverso dai riferimenti) per le posizioni di partenza
         self._gen = torch.Generator(device=self.device)
         self._gen.manual_seed(seed + 1)
+        self.noise = noise or NoiseConfig()
+        self._gen_noise = torch.Generator(device=self.device)
+        self._gen_noise.manual_seed(seed + 2)
 
         self._gravity_dir = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.n, 3)
 
@@ -149,8 +154,11 @@ class VelControllerEnv:
         return self._compute_errors(self.refs.step_ref)
 
     def observations(self) -> torch.Tensor:
-        """(N, obs_dim) osservazioni per la rete, rispetto al riferimento attuale."""
-        return vel_observations(self.world.q, self.world.qd, self._gravity_dir, self.prev_actions, self.refs.ref)
+        """(N, obs_dim) osservazioni per la rete, rispetto al riferimento attuale. Con il rumore la rete legge lo stato
+        MISURATO (velocità e assetto con rumore); il riferimento e la sua azione precedente non hanno rumore."""
+        q, qd = measure_state(self.world.q, self.world.qd, self.noise, self._gen_noise)
+        self.last_measured = (q, qd)  # per i grafici di valutazione
+        return vel_observations(q, qd, self._gravity_dir, self.prev_actions, self.refs.ref)
 
     # ------------------------------------------------------------------ terminazioni e reset
     def _uniform(self, low: float, high: float, shape) -> torch.Tensor:

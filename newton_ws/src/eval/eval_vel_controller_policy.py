@@ -24,6 +24,7 @@ Senza display: --viewer null (stampa solo le metriche).
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -35,6 +36,7 @@ import torch
 import warp as wp
 
 from controllers.math_utils import quat_rotate
+from controllers.noise import NoiseConfig
 from controllers.vel_controller.ref_handler import RefHandler
 from controllers.vel_controller.vel_controller_env import VelControllerEnv
 from controllers.vel_controller.vel_controller_mlp import VelControllerMLP
@@ -77,7 +79,8 @@ class Example:
         )
         # Il drone parte in aria, vicino all'origine: la sequenza di riferimenti lo sposta di qualche metro
         self.env = VelControllerEnv(
-            self.world, refs, seed=self.seed, spawn_xy_range=(-0.5, 0.5), spawn_z_range=(1.5, 2.5)
+            self.world, refs, seed=self.seed, spawn_xy_range=(-0.5, 0.5), spawn_z_range=(1.5, 2.5),
+            noise=NoiseConfig(att=math.radians(args.noise_att_deg), lin_vel=args.noise_lin_vel, ang_vel=args.noise_ang_vel),
         )
         # Riferimento scelto a mano da terminale: fisso per tutta la prova (gli assi non indicati a 0)
         given = [args.vx, args.vy, args.vz, args.wz]
@@ -243,6 +246,9 @@ if __name__ == "__main__":
     parser.add_argument("--hold_max", type=float, default=5.0, help="durata massima di ogni riferimento [s] (training: 2.5)")
     parser.add_argument("--max_s", type=float, default=40.0, help="tempo massimo di simulazione [s], per non restare bloccati")
     parser.add_argument("--pace", action=argparse.BooleanOptionalAction, default=True, help="simula a tempo reale")
+    parser.add_argument("--noise_att_deg", type=float, default=0.0, help="rumore bianco sull'assetto misurato, roll/pitch/yaw [gradi]")
+    parser.add_argument("--noise_lin_vel", type=float, default=0.0, help="rumore bianco sulla velocità lineare misurata [m/s]")
+    parser.add_argument("--noise_ang_vel", type=float, default=0.0, help="rumore bianco sulla velocità angolare misurata [rad/s]")
     parser.add_argument("--seed", type=int, default=None, help="seme dei riferimenti (default: casuale a ogni lancio)")
     parser.add_argument("--plot_drone", type=int, default=0, help="quale drone registrare per i grafici")
     parser.add_argument("--plots", action=argparse.BooleanOptionalAction, default=True, help="salva i grafici alla fine")
