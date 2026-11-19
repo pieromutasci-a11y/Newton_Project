@@ -26,3 +26,18 @@ def yaw_from_quat(q: torch.Tensor) -> torch.Tensor:
     """Angolo di imbardata (rotazione attorno a z del mondo) da un quaternione (x, y, z, w)."""
     x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
     return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Prodotto di quaternioni a * b, entrambi (N, 4) come (x, y, z, w): applica prima b, poi a."""
+    ax, ay, az, aw = a.unbind(-1)
+    bx, by, bz, bw = b.unbind(-1)
+    return torch.stack(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        dim=-1,
+    )

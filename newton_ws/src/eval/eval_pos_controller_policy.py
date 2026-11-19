@@ -42,7 +42,7 @@ import newton.examples
 import torch
 import warp as wp
 
-from controllers.pos_controller.pos_controller_env import PosControllerEnv, yaw_from_quat
+from controllers.pos_controller.pos_controller_env import NoiseConfig, PosControllerEnv, yaw_from_quat
 from controllers.pos_controller.pos_controller_mlp import PosControllerMLP
 from controllers.pos_controller.target_handler import TargetHandler
 from drone_model.params import DroneParams
@@ -96,7 +96,10 @@ class Example:
             f"iterazione {ckpt.get('vel_iteration', '?')})"
         )
 
-        self.env = PosControllerEnv(self.world, self.policy.vel_policy, targets, seed=self.seed)
+        self.env = PosControllerEnv(
+            self.world, self.policy.vel_policy, targets, seed=self.seed,
+            noise=NoiseConfig(args.noise_pos, math.radians(args.noise_att_deg), args.noise_lin_vel, args.noise_ang_vel, args.noise_vel_net),
+        )
         if self.fixed:
             # Gli assi non indicati restano quelli di partenza di ogni drone (la partenza è casuale: si legge dopo la creazione dell'env)
             start = self.world.pos.detach().clone()
@@ -254,6 +257,11 @@ class Example:
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.add_argument("--run", required=True, help="nome della run in data/pos_controller/policy/")
+    parser.add_argument("--noise_pos", type=float, default=0.0, help="rumore bianco sulla posizione misurata [m] (dev. standard)")
+    parser.add_argument("--noise_att_deg", type=float, default=0.0, help="rumore bianco sull'assetto misurato, roll/pitch/yaw [gradi]")
+    parser.add_argument("--noise_lin_vel", type=float, default=0.0, help="rumore bianco sulla velocità lineare misurata [m/s]")
+    parser.add_argument("--noise_ang_vel", type=float, default=0.0, help="rumore bianco sulla velocità angolare misurata [rad/s]")
+    parser.add_argument("--noise_vel_net", action=argparse.BooleanOptionalAction, default=True, help="il rumore arriva anche alla rete di velocità (congelata); --no-noise_vel_net: legge lo stato vero")
     parser.add_argument("--ckpt", choices=["best", "last"], default="best")
     parser.add_argument("--num_drones", type=int, default=1)
     parser.add_argument("--x", type=float, default=None, help="riferimento fisso di x [m] nel mondo (se indichi uno tra x, y, z, yaw: niente riferimenti casuali)")

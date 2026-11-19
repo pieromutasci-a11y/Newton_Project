@@ -194,6 +194,18 @@ Come in Isaac Lab (`wp_preview_horizon`), la rete vede una **finestra** sul rife
 - **Costo di calcolo:** circa 300 ms per iterazione con 4096 mondi (anche con `--traj_prob 0`: il peso è nelle piccole operazioni sul riferimento e nella cascata).
 - **Non ancora fatto:** training vero, curriculum sulla velocità, anteprima anche sui waypoint con attenuazione vicino al bersaglio (`preview_attenuazione_dist` di Isaac Lab).
 
+### 4.6 Rumore sul feedback (ramo `realismo`)
+
+Rumore bianco gaussiano sullo **stato misurato** (`NoiseConfig` in `pos_controller_env.py`): posizione (m), assetto (rotazione casuale attorno a x, y, z, rad),
+velocità lineare (m/s) e angolare (rad/s). Indipendente a ogni lettura; vale per la rete di posizione e, di default, anche per quella di velocità
+(`--no-noise_vel_net`: la rete di velocità, addestrata senza rumore, legge lo stato vero). Il costo, le terminazioni e i grafici usano lo stato vero.
+Argomenti (training ed eval, default 0 = comportamento invariato): `--noise_pos`, `--noise_att_deg`, `--noise_lin_vel`, `--noise_ang_vel`.
+
+`src/eval/noise_sensitivity.py [run] [best|last]` misura quanto degrada una policy già addestrata. Risultato su `apg_pos_custom_v1` (1024 mondi, 15 s, un seme):
+senza rumore l'errore dopo 4 s è 0.7-4 mm; con 1 cm di rumore sulla posizione o 0.05 m/s sulla velocità lineare l'errore sale a 0.1-2 m con qualche mondo che diverge;
+con tutto insieme (1 cm, 0.5°, 0.05 m/s, 0.05 rad/s) la policy diverge (errore medio >10 m). Rumore d'assetto di 0.5° e angolare di 0.05 rad/s sono invece tollerati.
+La policy addestrata senza rumore ha quindi un guadagno molto alto sulla posizione e sulla velocità: serve addestrarla con il rumore.
+
 ## 5. Comandi
 
 ```bash

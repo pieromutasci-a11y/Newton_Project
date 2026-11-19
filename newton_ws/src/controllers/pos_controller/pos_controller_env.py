@@ -34,7 +34,7 @@ import torch
 
 from scene.train_world import TrainWorld
 
-from ..math_utils import quat_rotate_inverse, yaw_from_quat  # noqa: F401 (riesportate: i test le importano da qui)
+from ..math_utils import quat_mul, quat_rotate_inverse, yaw_from_quat  # noqa: F401 (riesportate: i test le importano da qui)
 from ..vel_controller.vel_controller_env import vel_observations
 from .target_handler import TargetHandler
 
@@ -53,6 +53,23 @@ class Errors:
     # (N, 3) velocità del riferimento nel sistema del corpo: nulla per i waypoint, quella della curva per le traiettorie.
     # None = nulla (il costo la tratta come zero).
     ref_vel_b: torch.Tensor | None = None
+
+
+@dataclass
+class NoiseConfig:
+    """Rumore bianco gaussiano sul FEEDBACK (stato misurato), indipendente a ogni lettura. Tutto a zero = misure esatte.
+
+    Si applica solo a ciò che la rete vede: il costo, le terminazioni e i grafici usano lo stato vero.
+    """
+
+    pos: float = 0.0  # m, deviazione standard sulla posizione (x, y, z)
+    att: float = 0.0  # rad, deviazione standard della rotazione d'assetto (roll, pitch e yaw, vettore di rotazione)
+    lin_vel: float = 0.0  # m/s, sulla velocità lineare (nel mondo; il rumore è isotropo)
+    ang_vel: float = 0.0  # rad/s, sulla velocità angolare
+    to_vel_net: bool = True  # se False la rete di velocità (congelata, addestrata senza rumore) legge lo stato vero
+
+    def any(self) -> bool:
+        return self.pos > 0 or self.att > 0 or self.lin_vel > 0 or self.ang_vel > 0
 
 
 class PosControllerEnv:
@@ -88,6 +105,7 @@ class PosControllerEnv:
         # Scala dei riferimenti di velocità: stesso campo su cui è stata addestrata la rete di velocità
         # (Isaac Lab: target_lin_vel_xy_scale = target_lin_vel_z_scale = 1.0 m/s, target_yaw_vel_scale = 1.5 rad/s)
         vel_scale: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.5),
+        noise: NoiseConfig | None = None,  # rumore sul feedback (default: nessuno)
     ):
         self.world = world
         self.low_level = low_level  # rete di velocità (congelata): osservazioni (N,17) -> azioni (N,4)
@@ -119,6 +137,9 @@ class PosControllerEnv:
         # Generatore casuale (seme diverso dai riferimenti) per le posizioni di partenza
         self._gen = torch.Generator(device=self.device)
         self._gen.manual_seed(seed + 1)
+        self.noise = noise or NoiseConfig()
+        self._gen_noise = torch.Generator(device=self.device)
+        self._gen_noise.manual_seed(seed + 2)
 
         self._gravity_dir = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.n, 3)
 
@@ -147,7 +168,8 @@ class PosControllerEnv:
         """
         self.v_ref = torch.clamp(actions, -1.0, 1.0) * self.vel_scale  # (N, 4) m/s e rad/s, nel corpo
         for _ in range(self.n_sub):
-            vel_obs = vel_observations(self.world.q, self.world.qd, self._gravity_dir, self.low_prev_actions, self.v_ref)
+            qm, qdm = self._measure() if self.noise.to_vel_net else (self.world.q, self.world.qd)
+            vel_obs = vel_observations(qm, qdm, self._gravity_dir, self.low_prev_actions, self.v_ref)
             wrench = self.low_level(vel_obs)  # spinta e momenti normalizzati, in [-1, 1]
             self.world.step(wrench)
             self.low_prev_actions = wrench
@@ -175,8 +197,22 @@ class PosControllerEnv:
         return self.targets.is_last & ~self.targets.is_traj & (self._hold_timer >= self._hold_time_s)
 
     # ------------------------------------------------------------------ errori e osservazioni
-    def _compute_errors(self, target_pos: torch.Tensor, target_yaw: torch.Tensor, target_vel: torch.Tensor) -> Errors:
-        q, qd = self.world.q, self.world.qd
+    def _measure(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stato MISURATO (q (N,7), qd (N,6)): quello vero più rumore bianco (NoiseConfig). Una nuova estrazione a ogni
+        chiamata. Il rumore è additivo (il gradiente passa invariato); sull'assetto è una piccola rotazione casuale."""
+        q, qd, nz = self.world.q, self.world.qd, self.noise
+        if not nz.any():
+            return q, qd
+        randn = lambda: torch.randn(self.n, 3, device=self.device, generator=self._gen_noise)  # noqa: E731
+        pos, quat = q[:, :3] + nz.pos * randn(), q[:, 3:7]
+        if nz.att > 0:
+            dq = torch.cat([0.5 * nz.att * randn(), torch.ones(self.n, 1, device=self.device)], dim=-1)
+            quat = quat_mul(quat, dq / dq.norm(dim=-1, keepdim=True))
+        lin, ang = qd[:, :3] + nz.lin_vel * randn(), qd[:, 3:6] + nz.ang_vel * randn()
+        return torch.cat([pos, quat], dim=-1), torch.cat([lin, ang], dim=-1)
+
+    def _compute_errors(self, target_pos: torch.Tensor, target_yaw: torch.Tensor, target_vel: torch.Tensor, measured=None) -> Errors:
+        q, qd = measured if measured is not None else (self.world.q, self.world.qd)
         pos, quat = q[:, :3], q[:, 3:7]
         # Convenzione verificata: qd = (velocità lineare | velocità angolare), nel sistema del mondo
         return Errors(
@@ -196,11 +232,12 @@ class PosControllerEnv:
     def observations(self) -> torch.Tensor:
         """(N, obs_dim) osservazioni per la rete, rispetto al riferimento attuale."""
         t = self.targets
-        e = self._compute_errors(t.target_pos, t.target_yaw, t.target_vel)
+        measured = self._measure()  # feedback con rumore (se configurato); il costo usa invece errors(), lo stato vero
+        e = self._compute_errors(t.target_pos, t.target_yaw, t.target_vel, measured)
         # Errore di posizione nel sistema del CORPO (non del mondo): la rete deve sapere in che direzione del
         # drone si trova il bersaglio, cioè verso quale asse inclinarsi. Con l'errore nel mondo servirebbe
         # l'orientamento assoluto del drone per ruotarlo (in Isaac Lab c'era sin/cos dell'angolo di yaw assoluto).
-        quat = self.world.q[:, 3:7]
+        quat = measured[0][:, 3:7]
         pos_err_b = quat_rotate_inverse(quat, e.pos_err)
         # Anteprima: incrementi tra i punti futuri del riferimento (nel corpo, come l'errore di posizione)
         dpos, dyaw = t.window()  # (N, H-1, 3), (N, H-1)

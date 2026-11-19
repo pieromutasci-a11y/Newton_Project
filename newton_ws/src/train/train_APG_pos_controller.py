@@ -20,6 +20,7 @@ Output (cartella newton_ws/data/pos_controller):
 """
 
 import argparse
+import math
 import dataclasses
 import os
 import sys
@@ -30,8 +31,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 
-from controllers.pos_controller.pos_controller_env import PosControllerEnv
+from controllers.pos_controller.pos_controller_env import NoiseConfig, PosControllerEnv
 from controllers.pos_controller.pos_controller_mlp import PosControllerMLP
+
 from controllers.pos_controller.target_handler import CUSTOM, TargetHandler
 from drone_model.params import DroneParams
 from scene.train_world import TrainWorld, TrainWorldConfig
@@ -61,6 +63,11 @@ def parse_args():
     p.add_argument("--traj_prob", type=float, default=0.5, help="probabilità che un episodio sia una traiettoria continua (0: solo waypoint)")
     p.add_argument("--traj_flat_prob", type=float, default=0.3, help="frazione di traiettorie sul piano orizzontale (le altre hanno orientamento 3D casuale)")
     p.add_argument("--custom_prob", type=float, default=0.5, help="tra le traiettorie, quota di curve CUSTOM (somme di sinusoidi casuali); le altre sono linea/cerchio/ellisse/otto/elica")
+    p.add_argument("--noise_pos", type=float, default=0.0, help="rumore bianco sulla posizione misurata [m] (dev. standard)")
+    p.add_argument("--noise_att_deg", type=float, default=0.0, help="rumore bianco sull'assetto misurato, roll/pitch/yaw [gradi]")
+    p.add_argument("--noise_lin_vel", type=float, default=0.0, help="rumore bianco sulla velocità lineare misurata [m/s]")
+    p.add_argument("--noise_ang_vel", type=float, default=0.0, help="rumore bianco sulla velocità angolare misurata [rad/s]")
+    p.add_argument("--noise_vel_net", action=argparse.BooleanOptionalAction, default=True, help="il rumore arriva anche alla rete di velocità (congelata); --no-noise_vel_net: legge lo stato vero")
     p.add_argument("--traj_speed_min", type=float, default=0.1, help="picco di velocità delle traiettorie, minimo [m/s]")
     p.add_argument("--traj_speed_max", type=float, default=0.5, help="picco di velocità delle traiettorie, massimo [m/s]")
     p.add_argument(
@@ -113,7 +120,9 @@ def main():
     targets = TargetHandler(
         args.num_envs, dev, seed=args.seed, dt=0.04, traj_prob=args.traj_prob, traj_flat_prob=args.traj_flat_prob, custom_prob=args.custom_prob, traj_speed_range=(args.traj_speed_min, args.traj_speed_max)
     )
-    env = PosControllerEnv(world, policy.vel_policy, targets, seed=args.seed, max_episode_s=args.episode_s)
+    env = PosControllerEnv(world, policy.vel_policy, targets, seed=args.seed, max_episode_s=args.episode_s,
+        noise=NoiseConfig(args.noise_pos, math.radians(args.noise_att_deg), args.noise_lin_vel, args.noise_ang_vel, args.noise_vel_net),
+    )
     assert policy.input_dim == env.obs_dim and policy.output_dim == env.action_dim, (
         f"mlp_config.yaml ({policy.input_dim} -> {policy.output_dim}) non coincide con "
         f"l'env ({env.obs_dim} -> {env.action_dim})"
