@@ -1,21 +1,25 @@
-apg_pos_noise_v1 (best.pt) - valutazione, drone 0, seed 1950046258, 40 ms/passo
+apg_pos_noise_v1 (best.pt) - valutazione, drone 0, seed 1950592594, 40 ms/passo
 passi di controllo registrati: 501 (20.0 s)
 
-                     min        max     limite
-spinta [N]          0.064     1.282   0 .. 1.536  (hover 0.853)
-momento x [N·m]   -0.0057   +0.0037   ±0.0210
-momento y [N·m]   -0.0064   +0.0060   ±0.0210
-momento z [N·m]   -0.0058   +0.0017   ±0.0085
+errore di posizione |e| [m]:  RMS tutto 0.0409 | RMS dopo 4 s 0.0081 | massimo dopo 4 s 0.0153 | finale 0.0065
+errore di yaw [deg]:         RMS tutto 17.51 | RMS dopo 4 s 0.30
+errore di velocità (RMS dopo 4 s): comando-reale vx 0.063 vy 0.052 vz 0.040 m/s wz 0.040 rad/s | reale-curva vx 0.019 vy 0.016 vz 0.043 m/s
 
-|v lineare| max nel corpo [m/s]:  x 0.41  y 0.43  z 0.56   (norma max 0.66)
-|ω| max nel corpo [rad/s]:       x 1.13  y 1.92  z 1.52
+                     min        max     limite
+spinta [N]          0.255     1.314   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0046   +0.0060   ±0.0210
+momento y [N·m]   -0.0108   +0.0065   ±0.0210
+momento z [N·m]   -0.0016   +0.0058   ±0.0085
+
+|v lineare| max nel corpo [m/s]:  x 0.58  y 0.49  z 0.56   (norma max 0.82)
+|ω| max nel corpo [rad/s]:       x 1.53  y 4.24  z 1.64
 
 riferimenti di velocità comandati dalla rete di posizione (max in modulo, campo ±1, ±1, ±1 m/s e ±1.5 rad/s):
-  vx 0.49  vy 0.53  vz 0.63 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 0.0%  vy 0.0%  vz 0.0%  wz 2.6%
+  vx 0.78  vy 0.61  vz 0.52 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 0.0%  vy 0.0%  vz 0.0%  wz 5.6%
 
 passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  spinta 0.0%  Mx 0.0%  My 0.0%  Mz 0.0%
 
 errore di misura (misurato - reale), RMS:
-  posizione x 0.0101  y 0.0098  z 0.0096 m | yaw 0.52°
-  velocità lineare nel corpo vx 0.0520  vy 0.0485  vz 0.0476 m/s
-  velocità angolare nel corpo ωx 0.0484  ωy 0.0498  ωz 0.0502 rad/s
+  posizione x 0.0097  y 0.0102  z 0.0102 m | yaw 0.49°
+  velocità lineare nel corpo vx 0.0498  vy 0.0518  vz 0.0480 m/s
+  velocità angolare nel corpo ωx 0.0529  ωy 0.0508  ωz 0.0493 rad/s
