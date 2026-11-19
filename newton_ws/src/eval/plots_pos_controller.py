@@ -1,12 +1,11 @@
 """Grafici e riepilogo numerico di una valutazione, in TRE figure: (1) posizione e yaw reali contro riferimento,
 (2) velocità reali contro i riferimenti di velocità comandati, (3) spinta e momenti con i limiti fisici.
-Con il rumore sul feedback si aggiungono due figure: posizione e yaw reali contro misurati, velocità reali contro misurate.
+Si aggiungono due figure di feedback: posizione e yaw reali contro misurati, velocità reali contro misurate
+(senza rumore le due curve coincidono).
 
 Riceve la registrazione di UN drone, una riga per passo di controllo, con colonne (vedi COLS).
 Le righe tutte NaN separano gli episodi (reset): le linee vengono spezzate lì.
 """
-
-import os
 
 import matplotlib
 
@@ -110,16 +109,8 @@ def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_t
         ax.legend(loc="upper right", fontsize=8, ncol=2)
     finish(fig, axes, out_prefix + "_spinta_momenti.png")
 
-    # --- Figure 4 e 5 (solo con rumore): feedback reale contro misurato ---
-    if meas is None:
-        # Senza rumore non si salvano: tolgo quelle di una valutazione precedente con rumore, altrimenti restano vecchie
-        # e sembrano il risultato di questa
-        for name in ("posizione", "velocita"):
-            try:
-                os.remove(f"{out_prefix}_feedback_{name}.png")
-            except OSError:
-                pass  # non esiste (o non si può cancellare: proprietà di un altro utente)
-    else:
+    # --- Figure 4 e 5: feedback reale contro misurato (senza rumore le due curve coincidono) ---
+    if meas is not None:
         m = {c: meas[:, i] for i, c in enumerate(MCOLS)}
 
         def real_meas(ax, real, measured, name, unit):

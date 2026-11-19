@@ -248,12 +248,13 @@ class Example:
         base = os.path.join(out_dir, f"eval_{self.args.ckpt}")
         rec = torch.stack(self.rec).cpu().numpy()
         title = f"{self.args.run} ({self.args.ckpt}.pt) - valutazione, drone {self.plot_drone}, seed {self.seed}, {self.env.dt * 1000:.0f} ms/passo"
-        noisy = self.env.noise.any()
-        meas = torch.stack(self.rec_meas).cpu().numpy() if noisy else None  # senza rumore reale e misurato coincidono
+        meas = torch.stack(self.rec_meas).cpu().numpy()  # senza rumore reale e misurato coincidono
         print("\n" + save_eval_plots(rec, self.params, base, base + "_summary.txt", title, meas=meas))
         k = self.args.ckpt
-        extra = f", eval_{k}_feedback_posizione.png, eval_{k}_feedback_velocita.png" if noisy else ""
-        print(f"\nGrafici e riepilogo salvati in {out_dir}/ (eval_{k}_posizione.png, eval_{k}_velocita.png, eval_{k}_spinta_momenti.png{extra}, eval_{k}_summary.txt)")
+        print(
+            f"\nGrafici e riepilogo salvati in {out_dir}/ (eval_{k}_posizione.png, eval_{k}_velocita.png, eval_{k}_spinta_momenti.png, "
+            f"eval_{k}_feedback_posizione.png, eval_{k}_feedback_velocita.png, eval_{k}_summary.txt)"
+        )
 
     @staticmethod
     def _yaw_tip(pos: torch.Tensor, yaw: torch.Tensor):
