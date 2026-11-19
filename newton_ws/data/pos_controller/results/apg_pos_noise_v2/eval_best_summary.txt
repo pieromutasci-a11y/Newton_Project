@@ -1,25 +1,25 @@
-apg_pos_noise_v2 (best.pt) - valutazione, drone 0, seed 1954789661, 40 ms/passo
+apg_pos_noise_v2 (best.pt) - valutazione, drone 0, seed 1955454105, 40 ms/passo
 passi di controllo registrati: 501 (20.0 s)
 
-errore di posizione |e| [m]:  RMS tutto 0.0347 | RMS dopo 4 s 0.0173 | massimo dopo 4 s 0.0326 | finale 0.0129
-errore di yaw [deg]:         RMS tutto 7.35 | RMS dopo 4 s 0.56
-errore di velocità (RMS dopo 4 s): comando-reale vx 0.141 vy 0.148 vz 0.072 m/s wz 0.079 rad/s | reale-curva vx 0.025 vy 0.021 vz 0.026 m/s
+errore di posizione |e| [m]:  RMS tutto 0.0224 | RMS dopo 4 s 0.0082 | massimo dopo 4 s 0.0167 | finale 0.0040
+errore di yaw [deg]:         RMS tutto 2.07 | RMS dopo 4 s 0.29
+errore di velocità (RMS dopo 4 s): comando-reale vx 0.094 vy 0.095 vz 0.075 m/s wz 0.065 rad/s | reale-curva vx 0.015 vy 0.016 vz 0.024 m/s
 
                      min        max     limite
-spinta [N]          0.197     1.214   0 .. 1.536  (hover 0.853)
-momento x [N·m]   -0.0072   +0.0044   ±0.0210
-momento y [N·m]   -0.0026   +0.0024   ±0.0210
-momento z [N·m]   -0.0012   +0.0055   ±0.0085
+spinta [N]          0.417     1.424   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0036   +0.0040   ±0.0210
+momento y [N·m]   -0.0050   +0.0050   ±0.0210
+momento z [N·m]   -0.0010   +0.0049   ±0.0085
 
-|v lineare| max nel corpo [m/s]:  x 0.57  y 0.60  z 0.29   (norma max 0.65)
-|ω| max nel corpo [rad/s]:       x 2.64  y 1.37  z 1.58
+|v lineare| max nel corpo [m/s]:  x 0.41  y 0.49  z 0.70   (norma max 0.72)
+|ω| max nel corpo [rad/s]:       x 1.81  y 2.74  z 1.48
 
 riferimenti di velocità comandati dalla rete di posizione (max in modulo, campo ±1, ±1, ±1 m/s e ±1.5 rad/s):
-  vx 0.72  vy 0.73  vz 0.39 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 0.0%  vy 0.0%  vz 0.0%  wz 2.4%
+  vx 0.56  vy 0.68  vz 0.75 m/s | wz 1.47 rad/s | oltre il 95% del campo: vx 0.0%  vy 0.0%  vz 0.0%  wz 0.8%
 
 passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  spinta 0.0%  Mx 0.0%  My 0.0%  Mz 0.0%
 
 errore di misura (misurato - reale), RMS:
-  posizione x 0.0099  y 0.0099  z 0.0105 m | yaw 0.52°
-  velocità lineare nel corpo vx 0.0516  vy 0.0507  vz 0.0520 m/s
-  velocità angolare nel corpo ωx 0.0502  ωy 0.0486  ωz 0.0496 rad/s
+  posizione x 0.0095  y 0.0103  z 0.0098 m | yaw 0.51°
+  velocità lineare nel corpo vx 0.0476  vy 0.0490  vz 0.0479 m/s
+  velocità angolare nel corpo ωx 0.0489  ωy 0.0481  ωz 0.0527 rad/s
