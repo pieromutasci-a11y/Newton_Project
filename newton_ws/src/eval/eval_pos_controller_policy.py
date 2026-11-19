@@ -178,7 +178,7 @@ class Example:
                     pos, tgt,
                     yaw_from_quat(self.world.q[d : d + 1, 3:7]),
                     self.env.targets.step_target_yaw[d : d + 1],
-                    e.lin_vel_b[d], e.ang_vel_b[d], self.env.low_prev_actions[d], self.env.v_ref[d],
+                    e.lin_vel_b[d], e.ang_vel_b[d], self.env.low_prev_actions[d], self.env.v_ref[d], e.ref_vel_b[d],
                 ]
             )
         )
@@ -253,7 +253,7 @@ class Example:
         k = self.args.ckpt
         print(
             f"\nGrafici e riepilogo salvati in {out_dir}/ (eval_{k}_posizione.png, eval_{k}_velocita.png, eval_{k}_spinta_momenti.png, "
-            f"eval_{k}_feedback_posizione.png, eval_{k}_feedback_velocita.png, eval_{k}_summary.txt)"
+            f"eval_{k}_errori_posizione.png, eval_{k}_errori_velocita.png, eval_{k}_feedback_posizione.png, eval_{k}_feedback_velocita.png, eval_{k}_summary.txt)"
         )
 
     @staticmethod

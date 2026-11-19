@@ -1,6 +1,6 @@
 """Grafici e riepilogo numerico di una valutazione, in TRE figure: (1) posizione e yaw reali contro riferimento,
 (2) velocità reali contro i riferimenti di velocità comandati, (3) spinta e momenti con i limiti fisici.
-Si aggiungono due figure di feedback: posizione e yaw reali contro misurati, velocità reali contro misurate
+Si aggiungono due figure di errori (posizione e yaw, velocità) e due di feedback: posizione e yaw reali contro misurati, velocità reali contro misurate
 (senza rumore le due curve coincidono).
 
 Riceve la registrazione di UN drone, una riga per passo di controllo, con colonne (vedi COLS).
@@ -16,8 +16,9 @@ import numpy as np
 from drone_model.params import DroneParams
 
 # Colonne di ogni riga registrata
-# a0..a3 = azioni della rete di VELOCITÀ (spinta e momenti); rvx..rwz = riferimenti di velocità comandati dalla rete di posizione
-COLS = ["t", "x", "y", "z", "xr", "yr", "zr", "yaw", "yaw_r", "vx", "vy", "vz", "wx", "wy", "wz", "a0", "a1", "a2", "a3", "rvx", "rvy", "rvz", "rwz"]
+# a0..a3 = azioni della rete di VELOCITÀ (spinta e momenti); rvx..rwz = riferimenti di velocità comandati dalla rete di posizione;
+# uvx..uvz = velocità del riferimento di posizione (la curva, o zero per i punti fissi) nel sistema del corpo
+COLS = ["t", "x", "y", "z", "xr", "yr", "zr", "yaw", "yaw_r", "vx", "vy", "vz", "wx", "wy", "wz", "a0", "a1", "a2", "a3", "rvx", "rvy", "rvz", "rwz", "uvx", "uvy", "uvz"]
 IDX = {c: i for i, c in enumerate(COLS)}
 # Feedback misurato (stesso istante e stessa cadenza): posizione e yaw misurati, velocità lineare e angolare nel corpo misurate
 MCOLS = ["xm", "ym", "zm", "yawm", "vxm", "vym", "vzm", "wxm", "wym", "wzm"]
@@ -109,7 +110,38 @@ def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_t
         ax.legend(loc="upper right", fontsize=8, ncol=2)
     finish(fig, axes, out_prefix + "_spinta_momenti.png")
 
-    # --- Figure 4 e 5: feedback reale contro misurato (senza rumore le due curve coincidono) ---
+    # --- Figure 4 e 5: errori di posizione/yaw e di velocità ---
+    def wrap(a):
+        return np.arctan2(np.sin(a), np.cos(a))
+
+    ex, ey, ez = (_col(rec, r) - _col(rec, n) for r, n in (("xr", "x"), ("yr", "y"), ("zr", "z")))
+    enorm = np.sqrt(ex**2 + ey**2 + ez**2)
+    eyaw = np.rad2deg(wrap(_col(rec, "yaw_r") - _col(rec, "yaw")))
+
+    def line(ax, y, name, unit, color="#1f77b4", label=None):
+        ax.plot(t, y, color=color, lw=1.3, label=label or name)
+        ax.axhline(0.0, color="gray", lw=0.6)
+        ax.set_ylabel(f"{name} [{unit}]")
+        ax.legend(loc="upper right", fontsize=8, ncol=2)
+
+    fig, axes = new_figure(5, "errori di posizione (riferimento - reale, nel sistema del mondo) e di yaw")
+    line(axes[0], ex, "ex", "m")
+    line(axes[1], ey, "ey", "m")
+    line(axes[2], ez, "ez", "m")
+    line(axes[3], enorm, "|e| distanza", "m", color="#d62728")
+    line(axes[4], eyaw, "e yaw", "deg")
+    finish(fig, axes, out_prefix + "_errori_posizione.png")
+
+    fig, axes = new_figure(4, "errori di velocità nel sistema del corpo: comando - reale (anello di velocità) e reale - riferimento (curva)")
+    for ax, (n, c, u_, unit) in zip(axes, (("vx", "rvx", "uvx", "m/s"), ("vy", "rvy", "uvy", "m/s"), ("vz", "rvz", "uvz", "m/s"), ("wz", "rwz", None, "rad/s"))):
+        line(ax, _col(rec, c) - _col(rec, n), f"{n}: comando - reale", unit, color="#2ca02c", label="comando - reale")
+        if u_ is not None:
+            ax.plot(t, _col(rec, n) - _col(rec, u_), color="#9467bd", lw=1.1, label="reale - riferimento (curva)")
+            ax.legend(loc="upper right", fontsize=8, ncol=2)
+        ax.set_ylabel(f"Δ{n} [{unit}]")
+    finish(fig, axes, out_prefix + "_errori_velocita.png")
+
+    # --- Figure 6 e 7: feedback reale contro misurato (senza rumore le due curve coincidono) ---
     if meas is not None:
         m = {c: meas[:, i] for i, c in enumerate(MCOLS)}
 
@@ -136,9 +168,21 @@ def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_t
     sat = lambda a: 100.0 * np.nanmean(np.abs(a[ok]) > 0.95)  # % di passi con comando quasi al limite
     v = np.stack([_col(rec, f"v{n}") for n in "xyz"], axis=1)
     w = np.stack([_col(rec, f"w{n}") for n in "xyz"], axis=1)
+    late = ok & (t > 4.0)  # dopo l'assestamento iniziale (partenza a distanza dal riferimento)
+    rms_ = lambda a, m_: float(np.sqrt(np.nanmean(a[m_] ** 2))) if m_.any() else float("nan")  # noqa: E731
+    dv_cmd = np.stack([_col(rec, c) - _col(rec, n) for c, n in (("rvx", "vx"), ("rvy", "vy"), ("rvz", "vz"), ("rwz", "wz"))], axis=1)
+    dv_ref = np.stack([_col(rec, n) - _col(rec, u_) for n, u_ in (("vx", "uvx"), ("vy", "uvy"), ("vz", "uvz"))], axis=1)
     lines = [
         title,
         f"passi di controllo registrati: {int(ok.sum())} ({np.nanmax(t) - np.nanmin(t):.1f} s)",
+        "",
+        "errore di posizione |e| [m]:  RMS tutto {:.4f} | RMS dopo 4 s {:.4f} | massimo dopo 4 s {:.4f} | finale {:.4f}".format(
+            rms_(enorm, ok), rms_(enorm, late), float(np.nanmax(enorm[late])) if late.any() else float("nan"), float(enorm[ok][-1])
+        ),
+        "errore di yaw [deg]:         RMS tutto {:.2f} | RMS dopo 4 s {:.2f}".format(rms_(eyaw, ok), rms_(eyaw, late)),
+        "errore di velocità (RMS dopo 4 s): comando-reale vx {:.3f} vy {:.3f} vz {:.3f} m/s wz {:.3f} rad/s | reale-curva vx {:.3f} vy {:.3f} vz {:.3f} m/s".format(
+            *[rms_(dv_cmd[:, k], late) for k in range(4)], *[rms_(dv_ref[:, k], late) for k in range(3)]
+        ),
         "",
         "                     min        max     limite",
         f"spinta [N]        {np.nanmin(thrust):7.3f}   {np.nanmax(thrust):7.3f}   0 .. {params.max_thrust:.3f}  (hover {params.weight:.3f})",
