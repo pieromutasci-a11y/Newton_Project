@@ -1,0 +1,16 @@
+apg_pos_noise_v1 (best.pt) - valutazione, drone 0, seed 1948846843, 40 ms/passo
+passi di controllo registrati: 501 (20.0 s)
+
+                     min        max     limite
+spinta [N]          0.483     1.438   0 .. 1.536  (hover 0.853)
+momento x [N·m]   -0.0047   +0.0037   ±0.0210
+momento y [N·m]   -0.0055   +0.0067   ±0.0210
+momento z [N·m]   -0.0049   +0.0020   ±0.0085
+
+|v lineare| max nel corpo [m/s]:  x 0.66  y 0.73  z 0.70   (norma max 0.78)
+|ω| max nel corpo [rad/s]:       x 1.73  y 2.28  z 1.72
+
+riferimenti di velocità comandati dalla rete di posizione (max in modulo, campo ±1, ±1, ±1 m/s e ±1.5 rad/s):
+  vx 0.77  vy 0.89  vz 0.79 m/s | wz 1.50 rad/s | oltre il 95% del campo: vx 0.0%  vy 0.0%  vz 0.0%  wz 7.2%
+
+passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  spinta 0.0%  Mx 0.0%  My 0.0%  Mz 0.0%

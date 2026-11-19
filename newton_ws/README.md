@@ -201,6 +201,9 @@ velocità lineare (m/s) e angolare (rad/s). Indipendente a ogni lettura; vale pe
 (`--no-noise_vel_net`: la rete di velocità, addestrata senza rumore, legge lo stato vero). Il costo, le terminazioni e i grafici usano lo stato vero.
 Argomenti (training ed eval, default 0 = comportamento invariato): `--noise_pos`, `--noise_att_deg`, `--noise_lin_vel`, `--noise_ang_vel`.
 
+Nell'eval con rumore, oltre ai grafici reale-riferimento, si salvano `eval_<ckpt>_feedback_posizione.png` e `eval_<ckpt>_feedback_velocita.png`
+(posizione, yaw e velocità reali contro misurati, cioè quelli letti dalla rete) e nel riepilogo l'errore di misura RMS. I grafici reale-riferimento usano sempre lo stato vero.
+
 `src/eval/noise_sensitivity.py [run] [best|last]` misura quanto degrada una policy già addestrata. Risultato su `apg_pos_custom_v1` (1024 mondi, 15 s, un seme):
 senza rumore l'errore dopo 4 s è 0.7-4 mm; con 1 cm di rumore sulla posizione o 0.05 m/s sulla velocità lineare l'errore sale a 0.1-2 m con qualche mondo che diverge;
 con tutto insieme (1 cm, 0.5°, 0.05 m/s, 0.05 rad/s) la policy diverge (errore medio >10 m). Rumore d'assetto di 0.5° e angolare di 0.05 rad/s sono invece tollerati.

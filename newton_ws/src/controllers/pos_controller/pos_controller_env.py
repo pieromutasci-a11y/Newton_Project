@@ -233,6 +233,7 @@ class PosControllerEnv:
         """(N, obs_dim) osservazioni per la rete, rispetto al riferimento attuale."""
         t = self.targets
         measured = self._measure()  # feedback con rumore (se configurato); il costo usa invece errors(), lo stato vero
+        self.last_measured = measured  # (q, qd) letti dalla rete di posizione: per i grafici di valutazione
         e = self._compute_errors(t.target_pos, t.target_yaw, t.target_vel, measured)
         # Errore di posizione nel sistema del CORPO (non del mondo): la rete deve sapere in che direzione del
         # drone si trova il bersaglio, cioè verso quale asse inclinarsi. Con l'errore nel mondo servirebbe

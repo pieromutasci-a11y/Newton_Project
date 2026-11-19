@@ -1,5 +1,6 @@
 """Grafici e riepilogo numerico di una valutazione, in TRE figure: (1) posizione e yaw reali contro riferimento,
 (2) velocità reali contro i riferimenti di velocità comandati, (3) spinta e momenti con i limiti fisici.
+Con il rumore sul feedback si aggiungono due figure: posizione e yaw reali contro misurati, velocità reali contro misurate.
 
 Riceve la registrazione di UN drone, una riga per passo di controllo, con colonne (vedi COLS).
 Le righe tutte NaN separano gli episodi (reset): le linee vengono spezzate lì.
@@ -17,6 +18,8 @@ from drone_model.params import DroneParams
 # a0..a3 = azioni della rete di VELOCITÀ (spinta e momenti); rvx..rwz = riferimenti di velocità comandati dalla rete di posizione
 COLS = ["t", "x", "y", "z", "xr", "yr", "zr", "yaw", "yaw_r", "vx", "vy", "vz", "wx", "wy", "wz", "a0", "a1", "a2", "a3", "rvx", "rvy", "rvz", "rwz"]
 IDX = {c: i for i, c in enumerate(COLS)}
+# Feedback misurato (stesso istante e stessa cadenza): posizione e yaw misurati, velocità lineare e angolare nel corpo misurate
+MCOLS = ["xm", "ym", "zm", "yawm", "vxm", "vym", "vzm", "wxm", "wym", "wzm"]
 
 
 def _col(rec, name):
@@ -31,9 +34,11 @@ def _break_wrap(y_deg):
     return y
 
 
-def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_txt: str, title: str) -> str:
+def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_txt: str, title: str, meas: np.ndarray | None = None) -> str:
     """Salva TRE figure, `<out_prefix>_posizione.png`, `<out_prefix>_velocita.png` e `<out_prefix>_spinta_momenti.png`,
-    più il riepilogo numerico in `out_txt`. Ritorna il testo del riepilogo."""
+    più il riepilogo numerico in `out_txt`. Con `meas` (righe di MCOLS, stessa lunghezza di `rec`) salva anche
+    `<out_prefix>_feedback_posizione.png` e `<out_prefix>_feedback_velocita.png` e aggiunge al riepilogo l'errore di misura.
+    Ritorna il testo del riepilogo."""
     t = _col(rec, "t")
     thrust = params.max_thrust * (_col(rec, "a0") + 1.0) / 2.0  # N
     m_lim = np.array([params.moment_scale_x, params.moment_scale_y, params.moment_scale_z])
@@ -103,6 +108,28 @@ def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_t
         ax.legend(loc="upper right", fontsize=8, ncol=2)
     finish(fig, axes, out_prefix + "_spinta_momenti.png")
 
+    # --- Figure 4 e 5 (solo con rumore): feedback reale contro misurato ---
+    if meas is not None:
+        m = {c: meas[:, i] for i, c in enumerate(MCOLS)}
+
+        def real_meas(ax, real, measured, name, unit):
+            ax.plot(t, measured, color="#d62728", lw=0.8, alpha=0.8, label=f"{name} misurata")
+            ax.plot(t, real, color="#1f77b4", lw=1.4, label=f"{name} reale")
+            ax.set_ylabel(f"{name} [{unit}]")
+            ax.legend(loc="upper right", fontsize=8, ncol=2)
+
+        fig, axes = new_figure(4, "feedback di posizione e yaw: reali contro misurati (quelli letti dalla rete)")
+        for ax, n in zip(axes[:3], "xyz"):
+            real_meas(ax, _col(rec, n), m[n + "m"], n, "m")
+        real_meas(axes[3], _break_wrap(np.rad2deg(_col(rec, "yaw"))), _break_wrap(np.rad2deg(m["yawm"])), "yaw", "deg")
+        axes[3].set_ylim(-190, 190)
+        finish(fig, axes, out_prefix + "_feedback_posizione.png")
+
+        fig, axes = new_figure(6, "feedback di velocità nel sistema del corpo: reali contro misurate (quelle lette dalla rete)")
+        for ax, (v, name, unit) in zip(axes, (("vx", "vx", "m/s"), ("vy", "vy", "m/s"), ("vz", "vz", "m/s"), ("wx", "ωx", "rad/s"), ("wy", "ωy", "rad/s"), ("wz", "ωz", "rad/s"))):
+            real_meas(ax, _col(rec, v), m[v + "m"], name, unit)
+        finish(fig, axes, out_prefix + "_feedback_velocita.png")
+
     # --- Riepilogo numerico: i valori da confrontare con i limiti ---
     ok = np.isfinite(t)
     sat = lambda a: 100.0 * np.nanmean(np.abs(a[ok]) > 0.95)  # % di passi con comando quasi al limite
@@ -134,6 +161,16 @@ def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_t
         "passi con comando della rete di velocità (spinta e momenti) oltre il 95% del limite:  "
         + "  ".join(f"{name} {sat(_col(rec, f'a{k}')):.1f}%" for k, name in enumerate(["spinta", "Mx", "My", "Mz"])),
     ]
+    if meas is not None:
+        wrap = lambda a: np.arctan2(np.sin(a), np.cos(a))  # noqa: E731
+        rms = lambda a: float(np.sqrt(np.nanmean(a[ok] ** 2)))  # noqa: E731
+        lines += [
+            "",
+            "errore di misura (misurato - reale), RMS:",
+            "  posizione x {:.4f}  y {:.4f}  z {:.4f} m | yaw {:.2f}°".format(*[rms(m[n + "m"] - _col(rec, n)) for n in "xyz"], np.rad2deg(rms(wrap(m["yawm"] - _col(rec, "yaw"))))),
+            "  velocità lineare nel corpo vx {:.4f}  vy {:.4f}  vz {:.4f} m/s".format(*[rms(m[f"v{n}m"] - _col(rec, f"v{n}")) for n in "xyz"]),
+            "  velocità angolare nel corpo ωx {:.4f}  ωy {:.4f}  ωz {:.4f} rad/s".format(*[rms(m[f"w{n}m"] - _col(rec, f"w{n}")) for n in "xyz"]),
+        ]
     text = "\n".join(lines)
     with open(out_txt, "w") as f:
         f.write(text + "\n")

@@ -130,6 +130,7 @@ class Example:
         self.args = args
         self.params = DroneParams()
         self.plot_drone = args.plot_drone
+        self.rec_meas = []  # stessa cadenza di rec: feedback MISURATO letto dalla rete (posizione, yaw, velocità nel corpo)
         self.rec = []  # una riga per passo di controllo del drone `plot_drone` (colonne: vedi eval/plots_pos_controller.py)
         self.pace = args.pace
         self.t_start = time.perf_counter()
@@ -186,6 +187,10 @@ class Example:
         self.env.prev_actions = self.env.prev_actions.detach()
         self.env.low_prev_actions = self.env.low_prev_actions.detach()
         self.obs = self.env.observations()
+        # Feedback misurato nello stesso istante dello stato vero registrato sopra: posizione e yaw dallo stato misurato,
+        # velocità lineare e angolare nel corpo come le legge la rete (colonne 5:8 e 8:11 dell'osservazione)
+        qm = self.env.last_measured[0][d]
+        self.rec_meas.append(torch.cat([qm[:3], yaw_from_quat(qm[None, 3:7]), self.obs[d, 5:8], self.obs[d, 8:11]]))
 
         self.sim_time += self.env.dt
         self.steps += 1
@@ -243,9 +248,12 @@ class Example:
         base = os.path.join(out_dir, f"eval_{self.args.ckpt}")
         rec = torch.stack(self.rec).cpu().numpy()
         title = f"{self.args.run} ({self.args.ckpt}.pt) - valutazione, drone {self.plot_drone}, seed {self.seed}, {self.env.dt * 1000:.0f} ms/passo"
-        print("\n" + save_eval_plots(rec, self.params, base, base + "_summary.txt", title))
+        noisy = self.env.noise.any()
+        meas = torch.stack(self.rec_meas).cpu().numpy() if noisy else None  # senza rumore reale e misurato coincidono
+        print("\n" + save_eval_plots(rec, self.params, base, base + "_summary.txt", title, meas=meas))
         k = self.args.ckpt
-        print(f"\nGrafici e riepilogo salvati in {out_dir}/ (eval_{k}_posizione.png, eval_{k}_velocita.png, eval_{k}_spinta_momenti.png, eval_{k}_summary.txt)")
+        extra = f", eval_{k}_feedback_posizione.png, eval_{k}_feedback_velocita.png" if noisy else ""
+        print(f"\nGrafici e riepilogo salvati in {out_dir}/ (eval_{k}_posizione.png, eval_{k}_velocita.png, eval_{k}_spinta_momenti.png{extra}, eval_{k}_summary.txt)")
 
     @staticmethod
     def _yaw_tip(pos: torch.Tensor, yaw: torch.Tensor):
