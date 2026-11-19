@@ -6,6 +6,8 @@ Riceve la registrazione di UN drone, una riga per passo di controllo, con colonn
 Le righe tutte NaN separano gli episodi (reset): le linee vengono spezzate lì.
 """
 
+import os
+
 import matplotlib
 
 matplotlib.use("Agg")  # nessuna finestra: salva solo i file
@@ -109,7 +111,15 @@ def save_eval_plots(rec: np.ndarray, params: DroneParams, out_prefix: str, out_t
     finish(fig, axes, out_prefix + "_spinta_momenti.png")
 
     # --- Figure 4 e 5 (solo con rumore): feedback reale contro misurato ---
-    if meas is not None:
+    if meas is None:
+        # Senza rumore non si salvano: tolgo quelle di una valutazione precedente con rumore, altrimenti restano vecchie
+        # e sembrano il risultato di questa
+        for name in ("posizione", "velocita"):
+            try:
+                os.remove(f"{out_prefix}_feedback_{name}.png")
+            except OSError:
+                pass  # non esiste (o non si può cancellare: proprietà di un altro utente)
+    else:
         m = {c: meas[:, i] for i, c in enumerate(MCOLS)}
 
         def real_meas(ax, real, measured, name, unit):
